@@ -1,5 +1,5 @@
 """
-12 Nodes Cluster with NFS Share
+Multiple Nodes Setup
 """
 
 import geni.portal as portal
@@ -13,13 +13,11 @@ CN_COUNT = 10
 MN_COUNT = 2
 
 HARDWARE_TYPE = 'd6515'
-IMAGE = 'urn:publicid:IDN+utah.cloudlab.us+image+emulab-ops//d6515-test'
+IMAGE = 'urn:publicid:IDN+emulab.net+image+emulab-ops//UBUNTU18-64-STD'
 
 lan = request.LAN('rdma-lan')
-lan.bandwidth = 100000000 # 100 Gbps
+lan.bandwidth = 100000000
 
-
-# --- CN ---
 for i in range(CN_COUNT):
     name = "cn-%d" % (i)
     node = request.RawPC(name)
@@ -27,17 +25,15 @@ for i in range(CN_COUNT):
     node.disk_image = IMAGE
     
     iface = node.addInterface("if1")
-    # IP: 10.10.1.1 ~ 10.10.1.10
+    iface.component_id = "eth4"
     iface.addAddress(pg.IPv4Address("10.10.1.%d" % (i + 1), "255.255.255.0"))
     lan.addInterface(iface)
 
-    # NFS Server
     if i == 0:
         nfs_bs = node.Blockstore("nfs-data", "/nfs_share")
         nfs_bs.size = "50GB"
         node.addService(pg.Execute(shell="sh", command="sudo chmod 777 /nfs_share"))
 
-# --- MN ---
 for j in range(MN_COUNT):
     name = "mn-%d" % (j)
     node = request.RawPC(name)
@@ -45,8 +41,10 @@ for j in range(MN_COUNT):
     node.disk_image = IMAGE
     
     iface = node.addInterface("if1")
+    iface.component_id = "eth4"
     ip_suffix = CN_COUNT + j + 1
     iface.addAddress(pg.IPv4Address("10.10.1.%d" % (ip_suffix), "255.255.255.0"))
     lan.addInterface(iface)
         
 pc.printRequestRSpec(request)
+
