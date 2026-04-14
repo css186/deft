@@ -18,7 +18,7 @@ def killall():
         ip_set.add(ip)
         print(f'killall {ip}')
 
-        cmd = f'killall -9 {g_cfg["client_app"]} > /dev/null; killall -9 {g_cfg["server_app"]} > /dev/null'
+        cmd = f'sudo pkill -9 {g_cfg["client_app"]} ; sudo pkill -9 {g_cfg["server_app"]}'
         ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
         ssh.close()
 

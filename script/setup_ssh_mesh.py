@@ -42,7 +42,7 @@ def generate_keypair():
 
     print('[SSH Mesh] Generating new RSA keypair...')
     ret = subprocess.run(
-        ['ssh-keygen', '-t', 'rsa', '-N', '', '-f', key_path, '-q'],
+        ['ssh-keygen', '-m', 'PEM', '-t', 'rsa', '-N', '', '-f', key_path, '-q'],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     if ret.returncode != 0:

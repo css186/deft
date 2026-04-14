@@ -11,9 +11,9 @@ from time import gmtime, strftime
 from ssh_connect import ssh_command
 
 if not os.path.exists('../result'):
-	os.makedirs('../result')
+    os.makedirs('../result')
 if not os.path.exists('../log'):
-	os.makedirs('../log')
+    os.makedirs('../log')
 
 def get_res_name(s):
     postfix = ""
@@ -33,7 +33,8 @@ subprocess.run(f'make -j', shell=True)
 num_servers = 2
 num_clients = 4
 
-threads_CN_arr = [30]
+# 已依據需求幫你更新為 32 個 Threads
+threads_CN_arr = [32]
 key_space_arr = [400e6]
 read_ratio_arr = [50]
 zipf_arr = [0.99]
@@ -65,7 +66,8 @@ with open(file_name, 'w') as fp:
 
     for job_id, (key_space, read_ratio, zipf, num_threads) in enumerate( product_list):
         key_space = int(key_space)
-        num_prefill_threads = 30
+        # 已幫你更新為 32
+        num_prefill_threads = 32
 
         print(f'start: {num_threads * num_clients} {num_clients} {num_threads} {key_space} {read_ratio} {zipf}')
         fp.write(f'total_threads: {num_threads * num_clients} num_servers: {num_servers} num_clients: {num_clients} num_threads: {num_threads} key_space: {key_space} read_ratio: {read_ratio} zipf: {zipf}\n')
@@ -78,11 +80,20 @@ with open(file_name, 'w') as fp:
         server_stdouts = []
         for i in range(num_servers):
             ip = g_cfg['servers'][i]['ip']
-            numa_id = g_cfg['servers'][i]['numa_id']
-            print(f'issue server {i} {ip} {numa_id}')
-            cmd = f'cd {exe_path} && sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && sudo numactl --interleave=all --cpunodebind={numa_id} ./{g_cfg["server_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {numa_id} > ../log/server_{i}.log 2>&1'
+            rdma_nic_id = g_cfg['servers'][i]['numa_id']
+            # 動態解析 yaml 裡面的 numa_nodes 陣列
+            if 'numa_nodes' in g_cfg['servers'][i]:
+                nodes = g_cfg['servers'][i]['numa_nodes']
+                numa_bind_str = ','.join(map(str, nodes)) if isinstance(nodes, list) else str(nodes)
+            else:
+                numa_bind_str = str(rdma_nic_id)
+                
+            print(f'issue server {i} {ip} bind:{numa_bind_str} (RDMA NIC {rdma_nic_id})')
+            # 確保使用 membind (Local Allocation)，拋棄 interleave
+            cmd = f'cd {exe_path} && sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && sudo numactl --membind={numa_bind_str} --cpunodebind={numa_bind_str} ./{g_cfg["server_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {rdma_nic_id} > ../log/server_{i}.log 2>&1'
+
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
-            server_sshs.append(ssh)
+            server_sshs.append((ssh, stderr))
             server_stdouts.append(stdout)
             time.sleep(1)
 
@@ -93,11 +104,19 @@ with open(file_name, 'w') as fp:
         client_stdouts = []
         for i in range(num_clients):
             ip = g_cfg['clients'][i]['ip']
-            numa_id = g_cfg['clients'][i]['numa_id']
-            print(f'issue client {i} {ip} {numa_id}')
-            cmd = f'cd {exe_path} && sudo numactl --interleave=all --cpunodebind={numa_id} gdb -q -batch -ex run -ex bt -ex quit --args ./{g_cfg["client_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {numa_id} --num_prefill_threads {num_prefill_threads} --num_bench_threads {num_threads} --key_space {key_space} --read_ratio {read_ratio} --zipf {zipf} > ../log/client_{i}.log 2>&1'
+            rdma_nic_id = g_cfg['clients'][i]['numa_id']
+            # 動態解析 yaml 裡面的 numa_nodes 陣列
+            if 'numa_nodes' in g_cfg['clients'][i]:
+                nodes = g_cfg['clients'][i]['numa_nodes']
+                numa_bind_str = ','.join(map(str, nodes)) if isinstance(nodes, list) else str(nodes)
+            else:
+                numa_bind_str = str(rdma_nic_id)
+                
+            print(f'issue client {i} {ip} bind:{numa_bind_str} (RDMA NIC {rdma_nic_id})')
+            # 同樣確保使用 membind
+            cmd = f'cd {exe_path} && sudo numactl --membind={numa_bind_str} --cpunodebind={numa_bind_str} gdb -q -batch -ex run -ex bt -ex quit --args ./{g_cfg["client_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {rdma_nic_id} --num_prefill_threads {num_prefill_threads} --num_bench_threads {num_threads} --key_space {key_space} --read_ratio {read_ratio} --zipf {zipf} > ../log/client_{i}.log 2>&1'
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
-            client_sshs.append(ssh)
+            client_sshs.append((ssh, stderr))
             client_stdouts.append(stdout)
             if i == 0:
                 time.sleep(1)
@@ -113,7 +132,8 @@ with open(file_name, 'w') as fp:
                 if server_stdouts[i].channel.exit_status_ready():
                     if server_stdouts[i].channel.recv_exit_status() != 0:
                         has_error = True
-                        print(f'server {i} error')
+                        err = server_sshs[i][1].read().decode().strip()
+                        print(f'server {i} error! SSH stderr: {err}')
                         break
                 else:
                     finish = False
@@ -123,7 +143,8 @@ with open(file_name, 'w') as fp:
                     if client_stdouts[i].channel.exit_status_ready():
                         if client_stdouts[i].channel.recv_exit_status() != 0:
                             has_error = True
-                            print(f'client {i} error')
+                            err = client_sshs[i][1].read().decode().strip()
+                            print(f'client {i} error! SSH stderr: {err}')
                             break
                     else:
                         finish = False
@@ -132,9 +153,9 @@ with open(file_name, 'w') as fp:
             killall.killall()
         
         for i in range(num_servers):
-            server_sshs[i].close()
+            server_sshs[i][0].close()
         for i in range(num_clients):
-            client_sshs[i].close()
+            client_sshs[i][0].close()
 
 
         loading_subproc = subprocess.run(f'grep "Loading Results" ../log/client_0.log', stdout=subprocess.PIPE, shell=True)

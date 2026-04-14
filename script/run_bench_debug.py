@@ -80,9 +80,9 @@ with open(file_name, 'w') as fp:
             ip = g_cfg['servers'][i]['ip']
             numa_id = g_cfg['servers'][i]['numa_id']
             print(f'issue server {i} {ip} {numa_id}')
-            cmd = f'cd {exe_path} && sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && sudo numactl --interleave=all --cpunodebind={numa_id} ./{g_cfg["server_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {numa_id} > ../log/server_{i}.log 2>&1'
+            cmd = f'cd {exe_path} && sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && sudo numactl --interleave=all --cpunodebind={numa_id} gdb -q -batch -ex run -ex bt -ex quit --args ./{g_cfg["server_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {numa_id} > ../log/server_{i}.log 2>&1'
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
-            server_sshs.append(ssh)
+            server_sshs.append((ssh, stderr))
             server_stdouts.append(stdout)
             time.sleep(1)
 
@@ -97,7 +97,7 @@ with open(file_name, 'w') as fp:
             print(f'issue client {i} {ip} {numa_id}')
             cmd = f'cd {exe_path} && sudo numactl --interleave=all --cpunodebind={numa_id} gdb -q -batch -ex run -ex bt -ex quit --args ./{g_cfg["client_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {numa_id} --num_prefill_threads {num_prefill_threads} --num_bench_threads {num_threads} --key_space {key_space} --read_ratio {read_ratio} --zipf {zipf} > ../log/client_{i}.log 2>&1'
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
-            client_sshs.append(ssh)
+            client_sshs.append((ssh, stderr))
             client_stdouts.append(stdout)
             if i == 0:
                 time.sleep(1)
@@ -113,7 +113,8 @@ with open(file_name, 'w') as fp:
                 if server_stdouts[i].channel.exit_status_ready():
                     if server_stdouts[i].channel.recv_exit_status() != 0:
                         has_error = True
-                        print(f'server {i} error')
+                        err = server_sshs[i][1].read().decode().strip()
+                        print(f'server {i} error! SSH stderr: {err}')
                         break
                 else:
                     finish = False
@@ -123,7 +124,8 @@ with open(file_name, 'w') as fp:
                     if client_stdouts[i].channel.exit_status_ready():
                         if client_stdouts[i].channel.recv_exit_status() != 0:
                             has_error = True
-                            print(f'client {i} error')
+                            err = client_sshs[i][1].read().decode().strip()
+                            print(f'client {i} error! SSH stderr: {err}')
                             break
                     else:
                         finish = False
@@ -132,9 +134,9 @@ with open(file_name, 'w') as fp:
             killall.killall()
         
         for i in range(num_servers):
-            server_sshs[i].close()
+            server_sshs[i][0].close()
         for i in range(num_clients):
-            client_sshs[i].close()
+            client_sshs[i][0].close()
 
 
         loading_subproc = subprocess.run(f'grep "Loading Results" ../log/client_0.log', stdout=subprocess.PIPE, shell=True)

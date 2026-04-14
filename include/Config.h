@@ -15,7 +15,7 @@ struct DSMConfig {
   // uint32_t machineNR;
   // uint64_t dsmSize;  // G
 
-  uint32_t dsm_size = 62;   // G
+  uint32_t dsm_size = 32;//62;   // G
   uint32_t cache_size = 1;  // G
   uint32_t rnic_id = 0;
   uint32_t num_client = 1;

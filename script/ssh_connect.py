@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-
+import os
 import yaml
 import paramiko
 
@@ -10,6 +10,7 @@ def ssh_command(ip, username, password, cmd):
     ssh = paramiko.SSHClient()
     ssh.load_system_host_keys()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ip, username=username, password=password)
+    key_path = os.path.expanduser('~/.ssh/id_rsa')
+    ssh.connect(ip, username=username, key_filename=key_path, look_for_keys=True)
     stdin, stdout, stderr = ssh.exec_command(cmd)
     return ssh, stdin, stdout, stderr
