@@ -33,7 +33,6 @@ subprocess.run(f'make -j', shell=True)
 num_servers = 2
 num_clients = 4
 
-# 已依據需求幫你更新為 32 個 Threads
 threads_CN_arr = [32]
 key_space_arr = [400e6]
 read_ratio_arr = [50]
@@ -66,8 +65,7 @@ with open(file_name, 'w') as fp:
 
     for job_id, (key_space, read_ratio, zipf, num_threads) in enumerate( product_list):
         key_space = int(key_space)
-        # 已幫你更新為 32
-        num_prefill_threads = 32
+        num_prefill_threads = 30
 
         print(f'start: {num_threads * num_clients} {num_clients} {num_threads} {key_space} {read_ratio} {zipf}')
         fp.write(f'total_threads: {num_threads * num_clients} num_servers: {num_servers} num_clients: {num_clients} num_threads: {num_threads} key_space: {key_space} read_ratio: {read_ratio} zipf: {zipf}\n')
@@ -89,7 +87,6 @@ with open(file_name, 'w') as fp:
                 numa_bind_str = str(rdma_nic_id)
                 
             print(f'issue server {i} {ip} bind:{numa_bind_str} (RDMA NIC {rdma_nic_id})')
-            # 確保使用 membind (Local Allocation)，拋棄 interleave
             cmd = f'cd {exe_path} && sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" && sudo numactl --membind={numa_bind_str} --cpunodebind={numa_bind_str} ./{g_cfg["server_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {rdma_nic_id} > ../log/server_{i}.log 2>&1'
 
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
@@ -99,13 +96,11 @@ with open(file_name, 'w') as fp:
 
         time.sleep(1)
         # start clients:
-
         client_sshs = []
         client_stdouts = []
         for i in range(num_clients):
             ip = g_cfg['clients'][i]['ip']
             rdma_nic_id = g_cfg['clients'][i]['numa_id']
-            # 動態解析 yaml 裡面的 numa_nodes 陣列
             if 'numa_nodes' in g_cfg['clients'][i]:
                 nodes = g_cfg['clients'][i]['numa_nodes']
                 numa_bind_str = ','.join(map(str, nodes)) if isinstance(nodes, list) else str(nodes)
@@ -113,7 +108,6 @@ with open(file_name, 'w') as fp:
                 numa_bind_str = str(rdma_nic_id)
                 
             print(f'issue client {i} {ip} bind:{numa_bind_str} (RDMA NIC {rdma_nic_id})')
-            # 同樣確保使用 membind
             cmd = f'cd {exe_path} && sudo numactl --membind={numa_bind_str} --cpunodebind={numa_bind_str} gdb -q -batch -ex run -ex bt -ex quit --args ./{g_cfg["client_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {rdma_nic_id} --num_prefill_threads {num_prefill_threads} --num_bench_threads {num_threads} --key_space {key_space} --read_ratio {read_ratio} --zipf {zipf} > ../log/client_{i}.log 2>&1'
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
             client_sshs.append((ssh, stderr))
