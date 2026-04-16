@@ -36,6 +36,10 @@ class Directory {
   // void sendData2App(const RawMessage *m);
 
   void process_message(const RawMessage *m);
+  
+  // For memory utilization stats
+  size_t malloc_count_ = 0;
+  void dump_memory_stats();
 };
 
 #endif /* __DIRECTORY_H__ */

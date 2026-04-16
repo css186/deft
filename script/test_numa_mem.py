@@ -35,7 +35,7 @@ num_clients = 4
 
 threads_CN_arr = [1, 2, 4, 8, 12, 16, 24, 32]
 key_space_arr = [400e6]
-read_ratio_arr = [50, 95, 100]
+read_ratio_arr = [95]
 zipf_arr = [0.99]
 
 # threads_CN_arr = [1, 2, 4, 8, 12, 16, 24, 32]
@@ -141,7 +141,31 @@ with open(file_name, 'w') as fp:
                             break
                     else:
                         finish = False
+        
+        fp.write("\n[Memory Statistics]\n")
+        for i in range(num_servers):
+            # 從各 server log 抓取最後一筆記憶體利用率
+            mem_subproc = subprocess.run(
+                f'grep "\\[Memory Utilization\\]" ../log/server_{i}.log | tail -1', 
+                stdout=subprocess.PIPE, shell=True
+            )
+            if mem_subproc.stdout:
+                mem_line = mem_subproc.stdout.decode("utf-8").strip()
+                fp.write(f"Server {i}: {mem_line}\n")
+                print(f"  Memory {i}: {mem_line}")
 
+        # 計算平均利用率（可選）
+        avg_subproc = subprocess.run(
+            f'grep "\\[Memory Utilization\\]" ../log/server_*.log | awk \'{{sum+=$5; count++}} END {{print sum/count}}\'',
+            stdout=subprocess.PIPE, shell=True
+        )
+        if avg_subproc.stdout:
+            avg_util = avg_subproc.stdout.decode("utf-8").strip()
+            fp.write(f"Average Memory Utilization: {avg_util}%\n")
+
+        fp.write("\n")
+        fp.flush()
+	
         if has_error:
             killall.killall()
         

@@ -60,10 +60,13 @@ void Directory::process_message(const RawMessage *m) {
   RawMessage *send = nullptr;
   switch (m->type) {
   case RpcType::MALLOC: {
-
-    send = (RawMessage *)dCon->message->getSendPool();
-
+    send = (RawMessage*)dCon->message->getSendPool();
     send->addr = chunckAlloc->alloc_chunck();
+    
+    malloc_count_++;
+    if (malloc_count_ % 5000 == 0) {
+        dump_memory_stats();
+    }
     break;
   }
 
@@ -92,4 +95,19 @@ void Directory::process_message(const RawMessage *m) {
   if (send) {
     dCon->sendMessage2App(send, m->node_id, m->app_id);
   }
+}
+
+void Directory::dump_memory_stats() {
+  if (!chunckAlloc) return;
+  
+  double util = (double) chunckAlloc->get_used_chunks() / chunckAlloc->get_total_chunks() * 100.0;
+  
+  printf("[Memory Utilization] Node %d Dir %d: %.2f%% (%zu/%zu chunks, %zu mallocs)\n",
+         nodeID, dirID, util, 
+         chunckAlloc->get_used_chunks(),
+         chunckAlloc->get_total_chunks(),
+         malloc_count_);
+  
+  fflush(stdout);
+
 }

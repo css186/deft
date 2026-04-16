@@ -52,6 +52,9 @@ public:
   void free_chunk(const GlobalAddress &addr) {
     bitmap[(addr.offset - start.offset) / define::kChunkSize] = false;
   }
+  
+  size_t get_used_chunks() const {return bitmap_tail;}
+  size_t get_total_chunks() const {return bitmap_len;}
 
 private:
   GlobalAddress start;
