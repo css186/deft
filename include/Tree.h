@@ -586,11 +586,15 @@ class Tree {
 
   void index_cache_statistics();
   void clear_statistics();
+  int64_t get_live_object_count() const;
+  uint64_t get_live_payload_bytes() const;
+  void dump_object_stats(const char *role, uint32_t id) const;
 
  private:
   DSMClient *dsm_client_;
   uint64_t tree_id;
   GlobalAddress root_ptr_ptr; // the address which stores root pointer;
+  std::atomic<int64_t> live_object_count_{0};
 
   // static thread_local int coro_id;
   static thread_local CoroCall worker[define::kMaxCoro];
@@ -679,9 +683,11 @@ class Tree {
   //                           int coro_id, bool share_lock);
   bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
                        GlobalAddress root, int level, CoroContext *ctx,
-                       bool from_cache = false, bool share_lock = false);
+                       bool from_cache = false, bool share_lock = false,
+                       bool *inserted_new = nullptr);
   bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
-                     CoroContext *ctx, int coro_id, bool from_cache = false);
+                     CoroContext *ctx, int coro_id, bool from_cache = false,
+                     bool *deleted_existing = nullptr);
 
   bool acquire_local_lock(GlobalAddress lock_addr, CoroContext *ctx,
                           int coro_id);

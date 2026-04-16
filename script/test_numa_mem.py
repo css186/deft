@@ -219,6 +219,8 @@ with open(file_name, 'w') as fp:
 
         client_rss_kb = []
         client_hugetlb_kb = []
+        client_payload_bytes = []
+        client_live_objects = []
         for i in range(num_clients):
             proc_subproc = subprocess.run(
                 f'grep "\\[Process Memory\\] Role client" ../log/client_{i}.log | tail -1',
@@ -233,15 +235,43 @@ with open(file_name, 'w') as fp:
                 if hugetlb is not None:
                     client_hugetlb_kb.append(hugetlb)
 
+            obj_subproc = subprocess.run(
+                f'grep "\\[Object Stats\\] Role client" ../log/client_{i}.log | tail -1',
+                stdout=subprocess.PIPE, shell=True)
+            obj_line = obj_subproc.stdout.decode("utf-8").strip()
+            if obj_line:
+                fp.write(f"Client {i} Object: {obj_line}\n")
+                payload_bytes = parse_int_field(obj_line, "payload_bytes")
+                live_objects = parse_int_field(obj_line, "live_objects")
+                if payload_bytes is not None:
+                    client_payload_bytes.append(payload_bytes)
+                if live_objects is not None:
+                    client_live_objects.append(live_objects)
+
         if dsm_usable_bytes:
             total_used = sum(dsm_used_bytes)
             total_usable = sum(dsm_usable_bytes)
             cluster_util = 0.0 if total_usable == 0 else total_used * 100.0 / total_usable
             fp.write(f"Average Memory Utilization: {cluster_util:.2f}%\n")
             fp.write(f"Cluster DSM Used: {format_bytes(total_used)} / {format_bytes(total_usable)} ({cluster_util:.2f}%)\n")
+            if client_payload_bytes:
+                total_payload = sum(client_payload_bytes)
+                object_eff = 0.0 if total_used == 0 else total_payload * 100.0 / total_used
+                fp.write(f"Approx Object-Level Efficiency: {object_eff:.4f}%\n")
+                fp.write(f"Cluster Live Payload: {format_bytes(total_payload)}\n")
+            else:
+                fp.write("Approx Object-Level Efficiency: N/A\n")
+                fp.write("Cluster Live Payload: N/A\n")
         else:
             fp.write("Average Memory Utilization: N/A\n")
             fp.write("Cluster DSM Used: N/A\n")
+            fp.write("Approx Object-Level Efficiency: N/A\n")
+            fp.write("Cluster Live Payload: N/A\n")
+
+        if client_live_objects:
+            fp.write(f"Cluster Live Objects: {sum(client_live_objects)}\n")
+        else:
+            fp.write("Cluster Live Objects: N/A\n")
 
         if server_rss_kb:
             fp.write(f"Average Server RSS: {sum(server_rss_kb) / len(server_rss_kb):.0f} kB\n")

@@ -459,6 +459,7 @@ int main(int argc, char *argv[]) {
            (double)stat_lat[lat_op] / stat_cnt[lat_op] / 1000.0);
   }
   dump_process_memory_stats("client", dsm_client->get_my_client_id());
+  tree->dump_object_stats("client", dsm_client->get_my_client_id());
 
   if (dsm_client->get_my_client_id() == 0) {
     RawMessage m;

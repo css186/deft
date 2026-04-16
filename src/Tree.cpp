@@ -87,6 +87,28 @@ Tree::Tree(DSMClient *dsm_client, uint16_t tree_id)
 
 Tree::~Tree() { delete index_cache; }
 
+int64_t Tree::get_live_object_count() const {
+  return live_object_count_.load(std::memory_order_relaxed);
+}
+
+uint64_t Tree::get_live_payload_bytes() const {
+  auto live_objects = get_live_object_count();
+  if (live_objects <= 0) {
+    return 0;
+  }
+  return static_cast<uint64_t>(live_objects) * (sizeof(Key) + sizeof(Value));
+}
+
+void Tree::dump_object_stats(const char *role, uint32_t id) const {
+  printf(
+      "[Object Stats] Role %s Id %u: live_objects=%lld payload_bytes=%llu "
+      "payload_per_object=%zu\n",
+      role, id, static_cast<long long>(get_live_object_count()),
+      static_cast<unsigned long long>(get_live_payload_bytes()),
+      sizeof(Key) + sizeof(Value));
+  fflush(stdout);
+}
+
 void Tree::print_verbose() {
   constexpr int kLeafHdrOffset = offsetof(LeafPage, hdr);
   constexpr int kInternalHdrOffset = offsetof(InternalPage, hdr);
@@ -671,6 +693,7 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *ctx) {
   int coro_id = ctx ? ctx->coro_id : 0;
 
   before_operation(ctx, coro_id);
+  bool inserted_new = false;
 
   Key min = kKeyMin;
   Key max = kKeyMax;
@@ -682,11 +705,16 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *ctx) {
       path_stack[coro_id][1] = parent_addr;
       auto root = get_root_ptr(ctx);
 #ifdef USE_SX_LOCK
-      bool status = leaf_page_store(cache_addr, k, v, root, 0, ctx, true, true);
+      bool status = leaf_page_store(cache_addr, k, v, root, 0, ctx, true, true,
+                                    &inserted_new);
 #else
-      bool status = leaf_page_store(cache_addr, k, v, root, 0, ctx, true);
+      bool status = leaf_page_store(cache_addr, k, v, root, 0, ctx, true,
+                                    false, &inserted_new);
 #endif
       if (status) {
+        if (inserted_new) {
+          live_object_count_.fetch_add(1, std::memory_order_relaxed);
+        }
         cache_hit[dsm_client_->get_my_thread_id()][0]++;
         return;
       }
@@ -737,9 +765,9 @@ next:
   // while (!res) {
 
 #ifdef USE_SX_LOCK
-  res = leaf_page_store(p, k, v, root, 0, ctx, false, true);
+  res = leaf_page_store(p, k, v, root, 0, ctx, false, true, &inserted_new);
 #else
-  res = leaf_page_store(p, k, v, root, 0, ctx, false);
+  res = leaf_page_store(p, k, v, root, 0, ctx, false, false, &inserted_new);
 #endif
   if (!res) {
     // retry
@@ -752,6 +780,9 @@ next:
     if (cnt > 1) {
       printf("retry insert <k:%lu v:%lu> %d\n", k, v, cnt);
     }
+  }
+  if (inserted_new) {
+    live_object_count_.fetch_add(1, std::memory_order_relaxed);
   }
   // }
 }
@@ -950,6 +981,7 @@ void Tree::del(const Key &k, CoroContext *ctx, int coro_id) {
   assert(dsm_client_->IsRegistered());
 
   before_operation(ctx, coro_id);
+  bool deleted_existing = false;
   Key min = kKeyMin;
   Key max = kKeyMax;
 
@@ -957,7 +989,11 @@ void Tree::del(const Key &k, CoroContext *ctx, int coro_id) {
     GlobalAddress cache_addr, parent_addr;
     auto entry = index_cache->search_from_cache(k, &cache_addr, &parent_addr);
     if (entry) {  // cache hit
-      if (leaf_page_del(cache_addr, k, 0, ctx, coro_id, true)) {
+      if (leaf_page_del(cache_addr, k, 0, ctx, coro_id, true,
+                        &deleted_existing)) {
+        if (deleted_existing) {
+          live_object_count_.fetch_sub(1, std::memory_order_relaxed);
+        }
         cache_hit[dsm_client_->get_my_thread_id()][0]++;
         return;
       }
@@ -1003,7 +1039,10 @@ next:
     }
   }
 
-  leaf_page_del(p, k, 0, ctx, coro_id);
+  leaf_page_del(p, k, 0, ctx, coro_id, false, &deleted_existing);
+  if (deleted_existing) {
+    live_object_count_.fetch_sub(1, std::memory_order_relaxed);
+  }
 }
 
 bool Tree::leaf_page_group_search(GlobalAddress page_addr, const Key &k,
@@ -1677,7 +1716,8 @@ void Tree::internal_page_store_update_left_child(GlobalAddress page_addr,
 
 bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
                            const Value &v, GlobalAddress root, int level,
-                           CoroContext *ctx, bool from_cache, bool share_lock) {
+                           CoroContext *ctx, bool from_cache, bool share_lock,
+                           bool *inserted_new) {
   GlobalAddress lock_addr = get_lock_addr(page_addr);
 
   auto &rbuf = dsm_client_->get_rbuf(ctx ? ctx->coro_id : 0);
@@ -1719,7 +1759,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
       if (k >= header->highest) {
         release_lock(lock_addr, lock_buffer, ctx, true, share_lock);
         return leaf_page_store(header->sibling_ptr, k, v, root, level, ctx,
-                               false, share_lock);
+                               false, share_lock, inserted_new);
       }
     }
   }
@@ -1732,6 +1772,9 @@ retry_insert:
   insert_addr = nullptr;
   group->find(k, !(bucket_id % 2), &update_addr, &insert_addr);
   if (update_addr) {
+    if (inserted_new) {
+      *inserted_new = (update_addr->lv.val == kValueNull);
+    }
     LeafValue cas_val(update_addr->lv.cl_ver, v);
     cas_and_unlock(GADD(page_addr, ((char *)&update_addr->lv - page_buffer)),
                    3, cas_ret_buffer, update_addr->lv.raw, cas_val.raw, ~0ull,
@@ -1753,6 +1796,9 @@ retry_insert:
         (uint64_t)mask_buffer, ctx);
     // cas succeed or same key inserted by other thread
     if (cas_ok || (__bswap_64(cas_ret_buffer[0]) == k)) {
+      if (inserted_new) {
+        *inserted_new = cas_ok;
+      }
       release_lock(lock_addr, lock_buffer, ctx, true, share_lock);
       return true;
     }
@@ -1773,6 +1819,9 @@ retry_insert:
           GADD(page_addr, (char *)&insert_addr->key - page_buffer),
           sizeof(InternalKey), false);
       cas_val.val = v;
+      if (inserted_new) {
+        *inserted_new = true;
+      }
       cas_and_unlock(GADD(page_addr, ((char *)&insert_addr->lv - page_buffer)),
                      3, cas_ret_buffer, insert_addr->lv.raw, cas_val.raw, ~0ull,
                      lock_addr, lock_buffer, share_lock, ctx, false);
@@ -1841,6 +1890,9 @@ retry_insert_2:
   group->find(k, !(bucket_id % 2), &update_addr, &insert_addr);
 
   if (update_addr) {
+    if (inserted_new) {
+      *inserted_new = (update_addr->lv.val == kValueNull);
+    }
     LeafValue cas_val(update_addr->lv.cl_ver, v);
 #ifdef USE_CRC
     Timer t_crc;
@@ -1872,6 +1924,9 @@ retry_insert_2:
         (uint64_t)mask_buffer, ctx);
     // cas succeed or same key inserted by other thread
     if (cas_ok || (__bswap_64(cas_ret_buffer[0]) == k)) {
+      if (inserted_new) {
+        *inserted_new = cas_ok;
+      }
       release_lock(lock_addr, lock_buffer, ctx, true, share_lock);
       return true;
     }
@@ -1890,6 +1945,9 @@ retry_insert_2:
           GADD(page_addr, (char *)&insert_addr->key - page_buffer),
           sizeof(InternalKey), false);
       cas_val.val = v;
+      if (inserted_new) {
+        *inserted_new = true;
+      }
       cas_and_unlock(GADD(page_addr, ((char *)&insert_addr->lv - page_buffer)),
                      3, cas_ret_buffer, insert_addr->lv.raw, cas_val.raw, ~0ull,
                      lock_addr, lock_buffer, share_lock, ctx, true);
@@ -1974,6 +2032,9 @@ retry_insert_2:
     res =
         sibling->groups[bucket_id / 2].insert_for_split(k, v, !(bucket_id % 2));
   }
+  if (inserted_new) {
+    *inserted_new = res;
+  }
 
   if (sibling_addr.nodeID == page_addr.nodeID) {
     dsm_client_->Write(sibling_buf, sibling_addr, kLeafPageSize, false);
@@ -2011,7 +2072,8 @@ retry_insert_2:
 }
 
 bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
-                         CoroContext *ctx, int coro_id, bool from_cache) {
+                         CoroContext *ctx, int coro_id, bool from_cache,
+                         bool *deleted_existing) {
   GlobalAddress lock_addr = get_lock_addr(page_addr);
 
   auto &rbuf = dsm_client_->get_rbuf(coro_id);
@@ -2027,6 +2089,9 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
 
   if (from_cache &&
       (k < page->hdr.lowest || k >= page->hdr.highest)) {  // cache is stale
+    if (deleted_existing) {
+      *deleted_existing = false;
+    }
     release_lock(lock_addr, cas_buffer, ctx, true, false);
     return false;
   }
@@ -2034,8 +2099,8 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   if (k >= page->hdr.highest) {
     release_lock(lock_addr, cas_buffer, ctx, true, false);
     assert(page->hdr.sibling_ptr != GlobalAddress::Null());
-    this->leaf_page_del(page->hdr.sibling_ptr, k, level, ctx, coro_id);
-    return true;
+    return this->leaf_page_del(page->hdr.sibling_ptr, k, level, ctx, coro_id,
+                               false, deleted_existing);
   }
 
   assert(k >= page->hdr.lowest);
@@ -2047,7 +2112,7 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
     // back
     for (int i = 0; i < kAssociativity; ++i) {
       LeafEntry *p = &g->back[i];
-      if (p->key == k) {
+      if (p->key == k && p->lv.val != kValueNull) {
         p->lv.val = kValueNull;
         update_addr = p;
         break;
@@ -2057,7 +2122,7 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
     // front
     for (int i = 0; i < kAssociativity; ++i) {
       LeafEntry *p = &g->front[i];
-      if (p->key == k) {
+      if (p->key == k && p->lv.val != kValueNull) {
         p->lv.val = kValueNull;
         update_addr = p;
         break;
@@ -2069,7 +2134,7 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   if (update_addr == nullptr) {
     for (int i = 0; i < kAssociativity; ++i) {
       LeafEntry *p = &g->overflow[i];
-      if (p->key == k) {
+      if (p->key == k && p->lv.val != kValueNull) {
         p->lv.val = kValueNull;
         update_addr = p;
         break;
@@ -2078,11 +2143,17 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
   }
 
   if (update_addr) {
+    if (deleted_existing) {
+      *deleted_existing = true;
+    }
     write_and_unlock((char *)update_addr,
                      GADD(page_addr, ((char *)update_addr - (char *)page)),
                      sizeof(LeafEntry), cas_buffer, lock_addr, ctx, false,
                      false);
   } else {
+    if (deleted_existing) {
+      *deleted_existing = false;
+    }
     this->release_lock(lock_addr, cas_buffer, ctx, false, false);
   }
   return true;
