@@ -265,8 +265,8 @@ inline void Tree::acquire_sx_lock(GlobalAddress lock_addr,
   } else {
     add_val = upgrade_from_s ? (ADD_X_LOCK | ADD_S_UNLOCK) : ADD_X_LOCK;
   }
-  // Timer timer;
-  // timer.begin();
+  Timer timer;
+  timer.begin();
 
   dsm_client_->FaaDmBoundSync(lock_addr, 3, add_val, lock_buffer,
                               XS_LOCK_FAA_MASK, ctx);
@@ -303,8 +303,8 @@ retry:
     x_cnt = (*lock_buffer >> 48) & 0xffff;
     goto retry;
   }
-  // uint64_t t = timer.end();
-  // stat_helper.add(dsm_client_->get_my_thread_id(), lat_lock, t);
+  uint64_t t = timer.end();
+  stat_helper.add(dsm_client_->get_my_thread_id(), lat_lock, t);
 }
 
 inline void Tree::release_sx_lock(GlobalAddress lock_addr,
@@ -2115,13 +2115,13 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
   ctx.yield = &yield;
 
   Timer coro_timer;
-  // auto thread_id = dsm_client_->get_my_thread_id();
+  auto thread_id = dsm_client_->get_my_thread_id();
 
   // while (true) {
   while (coro_ops_cnt_start < coro_ops_total) {
     auto r = gen->next();
 
-    // coro_timer.begin();
+    coro_timer.begin();
     ++coro_ops_cnt_start;
     if (lock_bench) {
       this->lock_bench(r.k, &ctx, coro_id);
@@ -2133,13 +2133,13 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
         this->insert(r.k, r.v, &ctx);
       }
     }
-    // auto t = coro_timer.end();
+    auto t = coro_timer.end();
     // auto us_10 = t / 100;
     // if (us_10 >= LATENCY_WINDOWS) {
     //   us_10 = LATENCY_WINDOWS - 1;
     // }
     // latency[thread_id][us_10]++;
-    // stat_helper.add(thread_id, lat_op, t);
+    stat_helper.add(thread_id, lat_op, t);
     ++coro_ops_cnt_finish;
   }
   // printf("thread %d coro_id %d start %lu finish %lu\n",

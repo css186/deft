@@ -15,7 +15,7 @@
 
 //////////////////// workload parameters /////////////////////
 
-// #define USE_CORO
+#define USE_CORO
 const int kCoroCnt = 3;
 
 // #define BENCH_LOCK

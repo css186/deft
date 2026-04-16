@@ -35,13 +35,13 @@ num_clients = 4
 
 threads_CN_arr = [32]
 key_space_arr = [400e6]
-read_ratio_arr = [50]
+read_ratio_arr = [100, 80, 60, 40, 20, 0]
 zipf_arr = [0.99]
 
-# threads_CN_arr = [1] + [i for i in range(3, 31, 3)]
-# key_space_arr = [100e6, 200e6, 800e6, 1200e6]
-# read_ratio_arr = [80, 60, 40, 20, 0]
-# zipf_arr = [0.6, 0.7, 0.8, 0.9]
+# threads_CN_arr = [1, 2, 4, 8, 12, 16, 24, 32]
+# key_space_arr = [100e5, 500e5, 100e6, 400e6, 800e6, 1200e6]
+# read_ratio_arr = [100, 80, 60, 40, 20, 0]
+# zipf_arr = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99]
 
 print(threads_CN_arr)
 print(key_space_arr)
@@ -79,7 +79,6 @@ with open(file_name, 'w') as fp:
         for i in range(num_servers):
             ip = g_cfg['servers'][i]['ip']
             rdma_nic_id = g_cfg['servers'][i]['numa_id']
-            # 動態解析 yaml 裡面的 numa_nodes 陣列
             if 'numa_nodes' in g_cfg['servers'][i]:
                 nodes = g_cfg['servers'][i]['numa_nodes']
                 numa_bind_str = ','.join(map(str, nodes)) if isinstance(nodes, list) else str(nodes)
@@ -108,7 +107,7 @@ with open(file_name, 'w') as fp:
                 numa_bind_str = str(rdma_nic_id)
                 
             print(f'issue client {i} {ip} bind:{numa_bind_str} (RDMA NIC {rdma_nic_id})')
-            cmd = f'cd {exe_path} && sudo numactl --membind={numa_bind_str} --cpunodebind={numa_bind_str} gdb -q -batch -ex run -ex bt -ex quit --args ./{g_cfg["client_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {rdma_nic_id} --num_prefill_threads {num_prefill_threads} --num_bench_threads {num_threads} --key_space {key_space} --read_ratio {read_ratio} --zipf {zipf} > ../log/client_{i}.log 2>&1'
+            cmd = f'cd {exe_path} && sudo numactl --membind={numa_bind_str} --cpunodebind={numa_bind_str} ./{g_cfg["client_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {rdma_nic_id} --num_prefill_threads {num_prefill_threads} --num_bench_threads {num_threads} --key_space {key_space} --read_ratio {read_ratio} --zipf {zipf} > ../log/client_{i}.log 2>&1'
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
             client_sshs.append((ssh, stderr))
             client_stdouts.append(stdout)
