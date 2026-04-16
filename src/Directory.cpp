@@ -64,9 +64,6 @@ void Directory::process_message(const RawMessage *m) {
     send->addr = chunckAlloc->alloc_chunck();
     
     malloc_count_++;
-    if (malloc_count_ % 5000 == 0) {
-        dump_memory_stats();
-    }
     break;
   }
 
@@ -84,6 +81,7 @@ void Directory::process_message(const RawMessage *m) {
   }
 
   case RpcType::TERMINATE: {
+    dump_memory_stats();
     stop_flag.store(true, std::memory_order_release);
     break;
   }

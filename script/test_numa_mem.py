@@ -143,31 +143,6 @@ with open(file_name, 'w') as fp:
                     else:
                         finish = False
         
-        fp.write("\n[Memory Statistics]\n")
-        mem_utils = []
-        for i in range(num_servers):
-            # 從各 server log 抓取最後一筆記憶體利用率
-            mem_subproc = subprocess.run(
-                f'grep "\\[Memory Utilization\\]" ../log/server_{i}.log | tail -1', 
-                stdout=subprocess.PIPE, shell=True
-            )
-            if mem_subproc.stdout:
-                mem_line = mem_subproc.stdout.decode("utf-8").strip()
-                fp.write(f"Server {i}: {mem_line}\n")
-                print(f"  Memory {i}: {mem_line}")
-                match = re.search(r':\s*([0-9]+(?:\.[0-9]+)?)%', mem_line)
-                if match:
-                    mem_utils.append(float(match.group(1)))
-
-        if mem_utils:
-            avg_util = sum(mem_utils) / len(mem_utils)
-            fp.write(f"Average Memory Utilization: {avg_util:.2f}%\n")
-        else:
-            fp.write("Average Memory Utilization: N/A\n")
-
-        fp.write("\n")
-        fp.flush()
-	
         if has_error:
             killall.killall()
         
@@ -186,6 +161,33 @@ with open(file_name, 'w') as fp:
         tmp = res_subproc.stdout.decode("utf-8")
         print(tmp)
         fp.write(tmp + "\n")
+
+        fp.write("[Memory Statistics]\n")
+        mem_utils = []
+        for i in range(num_servers):
+            ip = g_cfg['servers'][i]['ip']
+            remote_cmd = (
+                f'cd {exe_path} && '
+                f'grep "\\[Memory Utilization\\]" ../log/server_{i}.log | tail -1'
+            )
+            ssh, stdin, stdout, stderr = ssh_command(ip, username, password, remote_cmd)
+            mem_line = stdout.read().decode("utf-8").strip()
+            ssh.close()
+
+            if mem_line:
+                fp.write(f"Server {i}: {mem_line}\n")
+                print(f"  Memory {i}: {mem_line}")
+                match = re.search(r':\s*([0-9]+(?:\.[0-9]+)?)%', mem_line)
+                if match:
+                    mem_utils.append(float(match.group(1)))
+
+        if mem_utils:
+            avg_util = sum(mem_utils) / len(mem_utils)
+            fp.write(f"Average Memory Utilization: {avg_util:.2f}%\n")
+        else:
+            fp.write("Average Memory Utilization: N/A\n")
+
+        fp.write("\n")
         fp.flush()
 
         subprocess.run(f'../script/killall.py', stdout=subprocess.DEVNULL, shell=True)
