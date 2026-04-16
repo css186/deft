@@ -20,6 +20,7 @@ public:
     bitmap_len = size / define::kChunkSize;
     bitmap = new bool[bitmap_len];
     memset(bitmap, 0, bitmap_len);
+    allocated_chunks = 0;
      
     // null ptr
     bitmap[0] = true;
@@ -41,6 +42,7 @@ public:
       res.offset += bitmap_tail * define::kChunkSize;
 
       bitmap_tail++;
+      allocated_chunks++;
     } else {
       assert(false);
       Debug::notifyError("TODO");
@@ -50,11 +52,20 @@ public:
   }
 
   void free_chunk(const GlobalAddress &addr) {
-    bitmap[(addr.offset - start.offset) / define::kChunkSize] = false;
+    auto idx = (addr.offset - start.offset) / define::kChunkSize;
+    if (bitmap[idx]) {
+      bitmap[idx] = false;
+      if (idx != 0) {
+        allocated_chunks--;
+      }
+    }
   }
   
-  size_t get_used_chunks() const {return bitmap_tail;}
-  size_t get_total_chunks() const {return bitmap_len;}
+  size_t get_used_chunks() const { return allocated_chunks; }
+  size_t get_total_chunks() const { return bitmap_len; }
+  size_t get_usable_chunks() const {
+    return bitmap_len > 0 ? bitmap_len - 1 : 0;
+  }
 
 private:
   GlobalAddress start;
@@ -63,6 +74,7 @@ private:
   bool *bitmap;
   size_t bitmap_len;
   size_t bitmap_tail;
+  size_t allocated_chunks;
 };
 
 #endif

@@ -1,5 +1,6 @@
 #include "Directory.h"
 #include "Common.h"
+#include "ProcessMemory.h"
 
 #include "connection.h"
 #include "DirectoryConnection.h"
@@ -99,17 +100,20 @@ void Directory::dump_memory_stats() {
   if (!chunckAlloc) return;
 
   size_t used_chunks = chunckAlloc->get_used_chunks();
-  size_t total_chunks = chunckAlloc->get_total_chunks();
-  double util = total_chunks == 0
+  size_t usable_chunks = chunckAlloc->get_usable_chunks();
+  size_t used_bytes = used_chunks * define::kChunkSize;
+  size_t usable_bytes = usable_chunks * define::kChunkSize;
+  double util = usable_chunks == 0
                     ? 0.0
-                    : static_cast<double>(used_chunks) / total_chunks * 100.0;
+                    : static_cast<double>(used_chunks) / usable_chunks * 100.0;
 
-  printf("[Memory Utilization] Node %d Dir %d: %.2f%% (%zu/%zu chunks, %zu mallocs)\n",
-         nodeID, dirID, util,
-         used_chunks,
-         total_chunks,
-         malloc_count_);
+  printf(
+      "[Memory Utilization] Node %d Dir %d: %.2f%% "
+      "used_bytes=%zu usable_bytes=%zu used_chunks=%zu usable_chunks=%zu "
+      "chunk_bytes=%llu mallocs=%zu\n",
+      nodeID, dirID, util, used_bytes, usable_bytes, used_chunks, usable_chunks,
+      static_cast<unsigned long long>(define::kChunkSize), malloc_count_);
+  dump_process_memory_stats("server", nodeID);
 
   fflush(stdout);
-
 }

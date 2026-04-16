@@ -27,6 +27,20 @@ def exec_command(command):
     return subprocess.Popen(command, shell=True)
 
 
+def parse_int_field(line, key):
+    match = re.search(rf'{key}=([0-9]+)', line)
+    return int(match.group(1)) if match else None
+
+
+def format_bytes(num_bytes):
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+
+
 # start benchmark
 
 subprocess.run(f'make -j', shell=True)
@@ -163,7 +177,10 @@ with open(file_name, 'w') as fp:
         fp.write(tmp + "\n")
 
         fp.write("[Memory Statistics]\n")
-        mem_utils = []
+        dsm_used_bytes = []
+        dsm_usable_bytes = []
+        server_rss_kb = []
+        server_hugetlb_kb = []
         for i in range(num_servers):
             ip = g_cfg['servers'][i]['ip']
             remote_cmd = (
@@ -177,15 +194,74 @@ with open(file_name, 'w') as fp:
             if mem_line:
                 fp.write(f"Server {i}: {mem_line}\n")
                 print(f"  Memory {i}: {mem_line}")
-                match = re.search(r':\s*([0-9]+(?:\.[0-9]+)?)%', mem_line)
-                if match:
-                    mem_utils.append(float(match.group(1)))
+                used_bytes = parse_int_field(mem_line, "used_bytes")
+                usable_bytes = parse_int_field(mem_line, "usable_bytes")
+                if used_bytes is not None and usable_bytes is not None:
+                    dsm_used_bytes.append(used_bytes)
+                    dsm_usable_bytes.append(usable_bytes)
 
-        if mem_utils:
-            avg_util = sum(mem_utils) / len(mem_utils)
-            fp.write(f"Average Memory Utilization: {avg_util:.2f}%\n")
+            proc_cmd = (
+                f'cd {exe_path} && '
+                f'grep "\\[Process Memory\\] Role server" ../log/server_{i}.log | tail -1'
+            )
+            ssh, stdin, stdout, stderr = ssh_command(ip, username, password, proc_cmd)
+            proc_line = stdout.read().decode("utf-8").strip()
+            ssh.close()
+
+            if proc_line:
+                fp.write(f"Server {i} Process: {proc_line}\n")
+                vmrss = parse_int_field(proc_line, "VmRSS_kB")
+                hugetlb = parse_int_field(proc_line, "HugetlbPages_kB")
+                if vmrss is not None:
+                    server_rss_kb.append(vmrss)
+                if hugetlb is not None:
+                    server_hugetlb_kb.append(hugetlb)
+
+        client_rss_kb = []
+        client_hugetlb_kb = []
+        for i in range(num_clients):
+            proc_subproc = subprocess.run(
+                f'grep "\\[Process Memory\\] Role client" ../log/client_{i}.log | tail -1',
+                stdout=subprocess.PIPE, shell=True)
+            proc_line = proc_subproc.stdout.decode("utf-8").strip()
+            if proc_line:
+                fp.write(f"Client {i} Process: {proc_line}\n")
+                vmrss = parse_int_field(proc_line, "VmRSS_kB")
+                hugetlb = parse_int_field(proc_line, "HugetlbPages_kB")
+                if vmrss is not None:
+                    client_rss_kb.append(vmrss)
+                if hugetlb is not None:
+                    client_hugetlb_kb.append(hugetlb)
+
+        if dsm_usable_bytes:
+            total_used = sum(dsm_used_bytes)
+            total_usable = sum(dsm_usable_bytes)
+            cluster_util = 0.0 if total_usable == 0 else total_used * 100.0 / total_usable
+            fp.write(f"Average Memory Utilization: {cluster_util:.2f}%\n")
+            fp.write(f"Cluster DSM Used: {format_bytes(total_used)} / {format_bytes(total_usable)} ({cluster_util:.2f}%)\n")
         else:
             fp.write("Average Memory Utilization: N/A\n")
+            fp.write("Cluster DSM Used: N/A\n")
+
+        if server_rss_kb:
+            fp.write(f"Average Server RSS: {sum(server_rss_kb) / len(server_rss_kb):.0f} kB\n")
+        else:
+            fp.write("Average Server RSS: N/A\n")
+
+        if server_hugetlb_kb:
+            fp.write(f"Average Server HugetlbPages: {sum(server_hugetlb_kb) / len(server_hugetlb_kb):.0f} kB\n")
+        else:
+            fp.write("Average Server HugetlbPages: N/A\n")
+
+        if client_rss_kb:
+            fp.write(f"Average Client RSS: {sum(client_rss_kb) / len(client_rss_kb):.0f} kB\n")
+        else:
+            fp.write("Average Client RSS: N/A\n")
+
+        if client_hugetlb_kb:
+            fp.write(f"Average Client HugetlbPages: {sum(client_hugetlb_kb) / len(client_hugetlb_kb):.0f} kB\n")
+        else:
+            fp.write("Average Client HugetlbPages: N/A\n")
 
         fp.write("\n")
         fp.flush()
