@@ -99,15 +99,19 @@ void Directory::process_message(const RawMessage *m) {
 
 void Directory::dump_memory_stats() {
   if (!chunckAlloc) return;
-  
-  double util = (double) chunckAlloc->get_used_chunks() / chunckAlloc->get_total_chunks() * 100.0;
-  
+
+  size_t used_chunks = chunckAlloc->get_used_chunks();
+  size_t total_chunks = chunckAlloc->get_total_chunks();
+  double util = total_chunks == 0
+                    ? 0.0
+                    : static_cast<double>(used_chunks) / total_chunks * 100.0;
+
   printf("[Memory Utilization] Node %d Dir %d: %.2f%% (%zu/%zu chunks, %zu mallocs)\n",
-         nodeID, dirID, util, 
-         chunckAlloc->get_used_chunks(),
-         chunckAlloc->get_total_chunks(),
+         nodeID, dirID, util,
+         used_chunks,
+         total_chunks,
          malloc_count_);
-  
+
   fflush(stdout);
 
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import os
+import re
 import sys
 import subprocess
 import time
@@ -143,6 +144,7 @@ with open(file_name, 'w') as fp:
                         finish = False
         
         fp.write("\n[Memory Statistics]\n")
+        mem_utils = []
         for i in range(num_servers):
             # 從各 server log 抓取最後一筆記憶體利用率
             mem_subproc = subprocess.run(
@@ -153,15 +155,15 @@ with open(file_name, 'w') as fp:
                 mem_line = mem_subproc.stdout.decode("utf-8").strip()
                 fp.write(f"Server {i}: {mem_line}\n")
                 print(f"  Memory {i}: {mem_line}")
+                match = re.search(r':\s*([0-9]+(?:\.[0-9]+)?)%', mem_line)
+                if match:
+                    mem_utils.append(float(match.group(1)))
 
-        # 計算平均利用率（可選）
-        avg_subproc = subprocess.run(
-            f'grep "\\[Memory Utilization\\]" ../log/server_*.log | awk \'{{sum+=$5; count++}} END {{print sum/count}}\'',
-            stdout=subprocess.PIPE, shell=True
-        )
-        if avg_subproc.stdout:
-            avg_util = avg_subproc.stdout.decode("utf-8").strip()
-            fp.write(f"Average Memory Utilization: {avg_util}%\n")
+        if mem_utils:
+            avg_util = sum(mem_utils) / len(mem_utils)
+            fp.write(f"Average Memory Utilization: {avg_util:.2f}%\n")
+        else:
+            fp.write("Average Memory Utilization: N/A\n")
 
         fp.write("\n")
         fp.flush()
