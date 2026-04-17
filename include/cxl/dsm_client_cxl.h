@@ -21,6 +21,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -66,6 +67,35 @@ class DSMClient {
   uint16_t get_server_size() { return 1; }   // CXL: 只有一個 server (nodeID=0)
   uint16_t get_client_size() { return 1; }
   uint64_t get_thread_tag() { return thread_tag_; }
+
+  static void DumpRecentLockTrace(uint64_t offset) {
+    std::lock_guard<std::mutex> guard(lock_history_mutex());
+    fprintf(stderr,
+            "[LOCK-HISTORY] dumping recent X-lock transitions for off=%lu\n",
+            offset);
+    const auto &history = lock_history();
+    size_t head = lock_history_head().load(std::memory_order_relaxed);
+    size_t cap = history.size();
+    for (size_t i = 0; i < cap; ++i) {
+      size_t idx = (head + i) % cap;
+      const auto &e = history[idx];
+      if (!e.valid || e.offset != offset) {
+        continue;
+      }
+      uint16_t old_s_tic, old_s_cur, old_x_tic, old_x_cur;
+      uint16_t new_s_tic, new_s_cur, new_x_tic, new_x_cur;
+      decode_lock(e.old_val, old_s_tic, old_s_cur, old_x_tic, old_x_cur);
+      decode_lock(e.new_val, new_s_tic, new_s_cur, new_x_tic, new_x_cur);
+      fprintf(stderr,
+              "[LOCK-HISTORY] seq=%lu th=%d op=%s off=%lu add=0x%lx "
+              "old=0x%016lx [s_tic=%u s_cur=%u x_tic=%u x_cur=%u] "
+              "new=0x%016lx [s_tic=%u s_cur=%u x_tic=%u x_cur=%u]\n",
+              e.seq, e.thread_id, e.op, e.offset, e.add_val, e.old_val,
+              old_s_tic, old_s_cur, old_x_tic, old_x_cur, e.new_val,
+              new_s_tic, new_s_cur, new_x_tic, new_x_cur);
+    }
+    fflush(stderr);
+  }
 
   // CXL 下 barrier 不需要 memcached，用簡單的 no-op
   // 因為只有一個 client process，不需要跨進程同步
@@ -693,6 +723,10 @@ class DSMClient {
   static void trace_lock_transition(const char *op, GlobalAddress gaddr,
                                     uint64_t add_val, uint64_t old_val,
                                     uint64_t new_val) {
+    if (touches_x_field(add_val)) {
+      record_lock_history(op, gaddr.offset, add_val, old_val, new_val);
+    }
+
     if (!lock_trace_enabled() || gaddr.offset != traced_lock_offset()) {
       return;
     }
@@ -710,6 +744,60 @@ class DSMClient {
             old_s_tic, old_s_cur, old_x_tic, old_x_cur,
             new_val, new_s_tic, new_s_cur, new_x_tic, new_x_cur);
     fflush(stderr);
+  }
+
+  struct LockTraceEntry {
+    bool valid = false;
+    uint64_t seq = 0;
+    uint64_t offset = 0;
+    uint64_t add_val = 0;
+    uint64_t old_val = 0;
+    uint64_t new_val = 0;
+    int thread_id = -1;
+    char op[16] = {};
+  };
+
+  static bool touches_x_field(uint64_t add_val) {
+    return (add_val & ((1ull << 32) | (1ull << 48))) != 0;
+  }
+
+  static std::array<LockTraceEntry, 8192> &lock_history() {
+    static std::array<LockTraceEntry, 8192> history{};
+    return history;
+  }
+
+  static std::atomic<size_t> &lock_history_head() {
+    static std::atomic<size_t> head{0};
+    return head;
+  }
+
+  static std::atomic<uint64_t> &lock_history_seq() {
+    static std::atomic<uint64_t> seq{0};
+    return seq;
+  }
+
+  static std::mutex &lock_history_mutex() {
+    static std::mutex mu;
+    return mu;
+  }
+
+  static void record_lock_history(const char *op, uint64_t offset,
+                                  uint64_t add_val, uint64_t old_val,
+                                  uint64_t new_val) {
+    std::lock_guard<std::mutex> guard(lock_history_mutex());
+    auto &history = lock_history();
+    size_t idx = lock_history_head().load(std::memory_order_relaxed);
+    auto &e = history[idx];
+    e.valid = true;
+    e.seq = lock_history_seq().fetch_add(1, std::memory_order_relaxed);
+    e.offset = offset;
+    e.add_val = add_val;
+    e.old_val = old_val;
+    e.new_val = new_val;
+    e.thread_id = thread_id_;
+    std::snprintf(e.op, sizeof(e.op), "%s", op);
+    lock_history_head().store((idx + 1) % history.size(),
+                              std::memory_order_relaxed);
   }
 
   static bool masked_cas_impl(void *ptr, int log_sz, uint64_t equal,

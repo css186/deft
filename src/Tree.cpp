@@ -295,6 +295,7 @@ retry:
           ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
       printf("s [%u, %u] x [%u, %u]\n", s_tic, s_cnt, x_tic, x_cnt);
       fflush(stdout);
+      DSMClient::DumpRecentLockTrace(lock_addr.offset);
       assert(false);
       exit(-1);
     }
@@ -509,6 +510,7 @@ retry:
           ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
       printf("s [%u, %u] x [%u, %u]\n", s_tic, s_cnt, x_tic, x_cnt);
       fflush(stdout);
+      DSMClient::DumpRecentLockTrace(lock_addr.offset);
       assert(false);
       exit(-1);
     }
