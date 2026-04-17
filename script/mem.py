@@ -43,11 +43,12 @@ subprocess.run('make -j', shell=True, check=True)
 num_servers = 2
 num_clients = 4
 
-# Memory study: fix concurrency, sweep dataset size and workload mix.
+# Memory study: primarily sweep key space under YCSB-A/C-like workloads.
 threads_CN_arr = [32]
 key_space_arr = [10e6, 50e6, 100e6, 400e6, 800e6, 1200e6]
-read_ratio_arr = [50, 95, 100]
+read_ratio_arr = [50, 100]
 zipf_arr = [0.99]
+prefill_ratio_arr = [0.90]
 
 # threads_CN_arr = [1, 2, 4, 8, 12, 16, 24, 32]
 # key_space_arr = [100e5, 500e5, 100e6, 400e6, 800e6, 1200e6]
@@ -58,6 +59,7 @@ print(threads_CN_arr)
 print(key_space_arr)
 print(read_ratio_arr)
 print(zipf_arr)
+print(prefill_ratio_arr)
 
 file_name = get_res_name("bench")
 
@@ -72,14 +74,19 @@ print(exe_path)
 
 
 with open(file_name, 'w') as fp:
-    product_list = list(product(key_space_arr, read_ratio_arr, zipf_arr, threads_CN_arr))
+    product_list = list(product(key_space_arr, read_ratio_arr, zipf_arr,
+                                prefill_ratio_arr, threads_CN_arr))
 
-    for job_id, (key_space, read_ratio, zipf, num_threads) in enumerate( product_list):
+    for job_id, (key_space, read_ratio, zipf, prefill_ratio, num_threads) in enumerate(product_list):
         key_space = int(key_space)
         num_prefill_threads = 30
 
-        print(f'start: {num_threads * num_clients} {num_clients} {num_threads} {key_space} {read_ratio} {zipf}')
-        fp.write(f'total_threads: {num_threads * num_clients} num_servers: {num_servers} num_clients: {num_clients} num_threads: {num_threads} key_space: {key_space} read_ratio: {read_ratio} zipf: {zipf}\n')
+        print(f'start: {num_threads * num_clients} {num_clients} {num_threads} {key_space} {read_ratio} {zipf} {prefill_ratio}')
+        fp.write(
+            f'total_threads: {num_threads * num_clients} num_servers: {num_servers} '
+            f'num_clients: {num_clients} num_threads: {num_threads} key_space: {key_space} '
+            f'read_ratio: {read_ratio} zipf: {zipf} prefill_ratio: {prefill_ratio}\n'
+        )
         fp.flush()
 
         # start servers:
@@ -118,7 +125,15 @@ with open(file_name, 'w') as fp:
                 numa_bind_str = str(rdma_nic_id)
                 
             print(f'issue client {i} {ip} bind:{numa_bind_str} (RDMA NIC {rdma_nic_id})')
-            cmd = f'cd {exe_path} && sudo numactl --membind={numa_bind_str} --cpunodebind={numa_bind_str} ./{g_cfg["client_app"]} --server_count {num_servers} --client_count {num_clients} --numa_id {rdma_nic_id} --num_prefill_threads {num_prefill_threads} --num_bench_threads {num_threads} --key_space {key_space} --read_ratio {read_ratio} --zipf {zipf} > ../log/client_{i}.log 2>&1'
+            cmd = (
+                f'cd {exe_path} && sudo numactl --membind={numa_bind_str} '
+                f'--cpunodebind={numa_bind_str} ./{g_cfg["client_app"]} '
+                f'--server_count {num_servers} --client_count {num_clients} '
+                f'--numa_id {rdma_nic_id} --num_prefill_threads {num_prefill_threads} '
+                f'--num_bench_threads {num_threads} --key_space {key_space} '
+                f'--read_ratio {read_ratio} --zipf {zipf} '
+                f'--prefill_ratio {prefill_ratio} > ../log/client_{i}.log 2>&1'
+            )
             ssh, stdin, stdout, stderr = ssh_command(ip, username, password, cmd)
             client_sshs.append((ssh, stderr))
             client_stdouts.append(stdout)
