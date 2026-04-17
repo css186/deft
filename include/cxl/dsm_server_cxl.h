@@ -12,6 +12,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -64,19 +65,38 @@ class DSMServer {
 
     // ================================================================
     // 第一步：分配 data memory + 綁定到指定 NUMA node
+    // 預設不用 MAP_HUGETLB，避免跨 NUMA 節點時 hugepage 實際落在錯誤的 node，
+    // 在第一次 touch 時觸發 SIGBUS。若要顯式測 hugepage，可設
+    // DEFT_CXL_USE_HUGEPAGE=1。
     // ================================================================
-    base_addr_ = (uint64_t)mmap(NULL, dsm_size_, PROT_READ | PROT_WRITE,
-                                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, 
-                                 -1, 0);
-    if ((void*)base_addr_ == MAP_FAILED) {
-      fprintf(stderr, "CXL DSMServer: hugepage mmap failed (%u GB), trying regular pages\n",
-              conf.dsm_size);
+    bool try_hugepage = false;
+    if (const char* env = std::getenv("DEFT_CXL_USE_HUGEPAGE")) {
+      try_hugepage = (strcmp(env, "1") == 0 || strcmp(env, "true") == 0 ||
+                      strcmp(env, "TRUE") == 0);
+    }
+
+    if (try_hugepage) {
+      base_addr_ = (uint64_t)mmap(NULL, dsm_size_, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB,
+                                   -1, 0);
+      if ((void*)base_addr_ == MAP_FAILED) {
+        fprintf(stderr,
+                "CXL DSMServer: hugepage mmap failed (%u GB), trying regular pages\n",
+                conf.dsm_size);
+      }
+    }
+
+    if (!try_hugepage || (void*)base_addr_ == MAP_FAILED) {
       base_addr_ = (uint64_t)mmap(NULL, dsm_size_, PROT_READ | PROT_WRITE,
                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if ((void*)base_addr_ == MAP_FAILED) {
-        perror("mmap fallback also failed");
+        perror("mmap failed");
         exit(1);
       }
+#ifdef MADV_HUGEPAGE
+      madvise((void*)base_addr_, dsm_size_, MADV_HUGEPAGE);
+#endif
+      printf("CXL DSMServer: using regular pages for data memory\n");
     }
 
     // mbind 到指定的 data NUMA node
