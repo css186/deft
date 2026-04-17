@@ -21,6 +21,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -493,7 +495,9 @@ class DSMClient {
                   CoroContext *ctx = nullptr) {
     (void)signal; (void)ctx;
     uint64_t *ptr = (uint64_t *)resolve_lock(gaddr);
-    faa_bound_impl(ptr, add_val, mask, rdma_buffer);
+    uint64_t new_val = 0;
+    faa_bound_impl(ptr, add_val, mask, rdma_buffer, &new_val);
+    trace_lock_transition("FaaDmBound", gaddr, add_val, *rdma_buffer, new_val);
   }
 
   void FaaDmBoundSync(GlobalAddress gaddr, int log_sz, uint64_t add_val,
@@ -627,7 +631,8 @@ class DSMClient {
    *   3. 嘗試 CAS，失敗則重試
    */
   static void faa_bound_impl(uint64_t *ptr, uint64_t add_val,
-                              uint64_t boundary_mask, uint64_t *result) {
+                              uint64_t boundary_mask, uint64_t *result,
+                              uint64_t *new_result = nullptr) {
     while (true) {
       uint64_t old_val = __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 
@@ -649,10 +654,62 @@ class DSMClient {
 
       if (__sync_bool_compare_and_swap(ptr, old_val, new_val)) {
         *result = old_val;
+        if (new_result != nullptr) {
+          *new_result = new_val;
+        }
         return;
       }
       // CAS failed, retry
     }
+  }
+
+  static bool lock_trace_enabled() {
+    static int enabled = []() {
+      const char *env = std::getenv("DEFT_CXL_TRACE_LOCK_OFFSET");
+      return (env != nullptr && env[0] != '\0') ? 1 : 0;
+    }();
+    return enabled != 0;
+  }
+
+  static uint64_t traced_lock_offset() {
+    static uint64_t offset = []() -> uint64_t {
+      const char *env = std::getenv("DEFT_CXL_TRACE_LOCK_OFFSET");
+      if (env == nullptr || env[0] == '\0') {
+        return UINT64_MAX;
+      }
+      return strtoull(env, nullptr, 0);
+    }();
+    return offset;
+  }
+
+  static void decode_lock(uint64_t raw, uint16_t &s_tic, uint16_t &s_cur,
+                          uint16_t &x_tic, uint16_t &x_cur) {
+    s_tic = raw & 0xffff;
+    s_cur = (raw >> 16) & 0xffff;
+    x_tic = (raw >> 32) & 0xffff;
+    x_cur = (raw >> 48) & 0xffff;
+  }
+
+  static void trace_lock_transition(const char *op, GlobalAddress gaddr,
+                                    uint64_t add_val, uint64_t old_val,
+                                    uint64_t new_val) {
+    if (!lock_trace_enabled() || gaddr.offset != traced_lock_offset()) {
+      return;
+    }
+
+    uint16_t old_s_tic, old_s_cur, old_x_tic, old_x_cur;
+    uint16_t new_s_tic, new_s_cur, new_x_tic, new_x_cur;
+    decode_lock(old_val, old_s_tic, old_s_cur, old_x_tic, old_x_cur);
+    decode_lock(new_val, new_s_tic, new_s_cur, new_x_tic, new_x_cur);
+
+    fprintf(stderr,
+            "[LOCK-TRACE] th=%d op=%s off=%lu add=0x%lx "
+            "old=0x%016lx [s_tic=%u s_cur=%u x_tic=%u x_cur=%u] "
+            "new=0x%016lx [s_tic=%u s_cur=%u x_tic=%u x_cur=%u]\n",
+            thread_id_, op, gaddr.offset, add_val, old_val,
+            old_s_tic, old_s_cur, old_x_tic, old_x_cur,
+            new_val, new_s_tic, new_s_cur, new_x_tic, new_x_cur);
+    fflush(stderr);
   }
 
   static bool masked_cas_impl(void *ptr, int log_sz, uint64_t equal,
