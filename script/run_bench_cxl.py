@@ -34,7 +34,7 @@ LOCK_NUMA = 0
 # ============================================================
 # Fixed benchmark parameters
 # ============================================================
-DSM_SIZE_GB = 8
+DSM_SIZE_GB = 62
 OPS_PER_THREAD = 1_000_000
 #
 # IMPORTANT:
@@ -49,15 +49,17 @@ JOB_TIMEOUT_SEC = 0
 # Sweep variables
 # Keep these aligned with script/run_bench.py
 # ============================================================
-THREADS_CN_ARR = [30]
+THREADS_CN_ARR = [1, 2, 4, 8, 16, 24, 32]
 KEY_SPACE_ARR = [400e6]
 READ_RATIO_ARR = [50]
 ZIPF_ARR = [0.99]
 
-# THREADS_CN_ARR = [1] + [i for i in range(3, 31, 3)]
-# KEY_SPACE_ARR = [100e6, 200e6, 800e6, 1200e6]
-# READ_RATIO_ARR = [80, 60, 40, 20, 0]
-# ZIPF_ARR = [0.6, 0.7, 0.8, 0.9]
+# threads_CN_arr = [1, 2, 4, 8, 12, 16, 24, 32]
+# key_space_arr = [100e5, 500e5, 100e6, 400e6, 800e6, 1200e6]
+# read_ratio_arr = [100, 80, 60, 40, 20, 0]
+# zipf_arr = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99]
+
+USE_HUGEPAGE = False
 
 
 def get_res_name(prefix: str) -> Path:
@@ -108,12 +110,13 @@ def parse_metrics(output: str):
     }
 
 
-def run_and_stream(cmd, cwd: Path, log_path: Path):
+def run_and_stream(cmd, cwd: Path, log_path: Path, env=None):
     collected = []
     with log_path.open("w") as log_fp:
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -179,6 +182,7 @@ def main() -> None:
     with result_path.open("w") as fp:
         fp.write(
             "job_id\tcpu_numa\tdata_numa\tlock_numa\tdsm_size_gb\tops_per_thread\t"
+            "use_hugepage\t"
             "num_prefill_threads\tnum_bench_threads\tkey_space\tread_ratio\tzipf\t"
             "loading_tp_mops\tloading_lat_us\tbenchmark_tp_mops\tavg_op_ns\t"
             "cache_hit_rate\tavg_lock_ns\tavg_read_page_ns\tavg_write_page_ns\t"
@@ -196,18 +200,23 @@ def main() -> None:
             )
 
             cmd = build_command(num_threads, key_space, read_ratio, zipf)
+            env = os.environ.copy()
+            if USE_HUGEPAGE:
+                env["DEFT_CXL_USE_HUGEPAGE"] = "1"
+            else:
+                env.pop("DEFT_CXL_USE_HUGEPAGE", None)
             print(
                 f"start job {job_id}: threads={num_threads} prefill_threads={num_prefill_threads} "
                 f"key_space={key_space} read_ratio={read_ratio} zipf={zipf}"
             )
 
-            returncode, output = run_and_stream(cmd, BUILD_DIR, log_path)
+            returncode, output = run_and_stream(cmd, BUILD_DIR, log_path, env=env)
 
             metrics = parse_metrics(output)
             status = "ok" if returncode == 0 else f"fail({returncode})"
 
             fp.write(
-                f"{job_id}\t{CPU_NUMA}\t{DATA_NUMA}\t{LOCK_NUMA}\t{DSM_SIZE_GB}\t{OPS_PER_THREAD}\t"
+                f"{job_id}\t{CPU_NUMA}\t{DATA_NUMA}\t{LOCK_NUMA}\t{DSM_SIZE_GB}\t{OPS_PER_THREAD}\t{int(USE_HUGEPAGE)}\t"
                 f"{num_prefill_threads}\t{num_threads}\t{key_space}\t{read_ratio}\t{zipf}\t"
                 f"{metrics['loading_tp_mops']}\t{metrics['loading_lat_us']}\t"
                 f"{metrics['benchmark_tp_mops']}\t{metrics['avg_op_ns']}\t"
