@@ -1,6 +1,5 @@
 #define STRIP_FLAG_HELP 1    // this must go before the #include!
 #include <gflags/gflags.h>
-#include "ProcessMemory.h"
 #include "Timer.h"
 #include "Tree.h"
 #include "zipf.h"
@@ -449,7 +448,6 @@ int main(int argc, char *argv[]) {
            cluster_tp / 1000.0,
            (double)stat_lat[lat_op] / stat_cnt[lat_op] / 1000.0);
   }
-  dump_process_memory_stats("client", dsm_client->get_my_client_id());
   tree->dump_object_stats("client", dsm_client->get_my_client_id());
 
   if (dsm_client->get_my_client_id() == 0) {

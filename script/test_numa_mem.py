@@ -22,11 +22,6 @@ def get_res_name(s):
         postfix = sys.argv[1]
     return '../result/' + s + "-" + postfix + strftime("-%m-%d-%H-%M", gmtime())  + ".txt"
 
-# async
-def exec_command(command):
-    return subprocess.Popen(command, shell=True)
-
-
 def parse_int_field(line, key):
     match = re.search(rf'{key}=([0-9]+)', line)
     return int(match.group(1)) if match else None
@@ -43,14 +38,15 @@ def format_bytes(num_bytes):
 
 # start benchmark
 
-subprocess.run(f'make -j', shell=True)
+subprocess.run('make -j', shell=True, check=True)
 
 num_servers = 2
 num_clients = 4
 
-threads_CN_arr = [1, 2, 4, 8, 12, 16, 24, 32]
-key_space_arr = [400e6]
-read_ratio_arr = [95]
+# Memory study: fix concurrency, sweep dataset size and workload mix.
+threads_CN_arr = [32]
+key_space_arr = [10e6, 50e6, 100e6, 400e6, 800e6, 1200e6]
+read_ratio_arr = [50, 95, 100]
 zipf_arr = [0.99]
 
 # threads_CN_arr = [1, 2, 4, 8, 12, 16, 24, 32]
@@ -166,21 +162,9 @@ with open(file_name, 'w') as fp:
             client_sshs[i][0].close()
 
 
-        loading_subproc = subprocess.run(f'grep "Loading Results" ../log/client_0.log', stdout=subprocess.PIPE, shell=True)
-        tmp = loading_subproc.stdout.decode("utf-8")
-        print(tmp.strip())
-        fp.write(tmp)
-
-        res_subproc = subprocess.run(f'grep "Final Results" ../log/client_0.log', stdout=subprocess.PIPE, shell=True)
-        tmp = res_subproc.stdout.decode("utf-8")
-        print(tmp)
-        fp.write(tmp + "\n")
-
         fp.write("[Memory Statistics]\n")
         dsm_used_bytes = []
         dsm_usable_bytes = []
-        server_rss_kb = []
-        server_hugetlb_kb = []
         for i in range(num_servers):
             ip = g_cfg['servers'][i]['ip']
             remote_cmd = (
@@ -192,7 +176,6 @@ with open(file_name, 'w') as fp:
             ssh.close()
 
             if mem_line:
-                fp.write(f"Server {i}: {mem_line}\n")
                 print(f"  Memory {i}: {mem_line}")
                 used_bytes = parse_int_field(mem_line, "used_bytes")
                 usable_bytes = parse_int_field(mem_line, "usable_bytes")
@@ -200,53 +183,16 @@ with open(file_name, 'w') as fp:
                     dsm_used_bytes.append(used_bytes)
                     dsm_usable_bytes.append(usable_bytes)
 
-            proc_cmd = (
-                f'cd {exe_path} && '
-                f'grep "\\[Process Memory\\] Role server" ../log/server_{i}.log | tail -1'
-            )
-            ssh, stdin, stdout, stderr = ssh_command(ip, username, password, proc_cmd)
-            proc_line = stdout.read().decode("utf-8").strip()
-            ssh.close()
-
-            if proc_line:
-                fp.write(f"Server {i} Process: {proc_line}\n")
-                vmrss = parse_int_field(proc_line, "VmRSS_kB")
-                hugetlb = parse_int_field(proc_line, "HugetlbPages_kB")
-                if vmrss is not None:
-                    server_rss_kb.append(vmrss)
-                if hugetlb is not None:
-                    server_hugetlb_kb.append(hugetlb)
-
-        client_rss_kb = []
-        client_hugetlb_kb = []
         client_payload_bytes = []
-        client_live_objects = []
         for i in range(num_clients):
-            proc_subproc = subprocess.run(
-                f'grep "\\[Process Memory\\] Role client" ../log/client_{i}.log | tail -1',
-                stdout=subprocess.PIPE, shell=True)
-            proc_line = proc_subproc.stdout.decode("utf-8").strip()
-            if proc_line:
-                fp.write(f"Client {i} Process: {proc_line}\n")
-                vmrss = parse_int_field(proc_line, "VmRSS_kB")
-                hugetlb = parse_int_field(proc_line, "HugetlbPages_kB")
-                if vmrss is not None:
-                    client_rss_kb.append(vmrss)
-                if hugetlb is not None:
-                    client_hugetlb_kb.append(hugetlb)
-
             obj_subproc = subprocess.run(
                 f'grep "\\[Object Stats\\] Role client" ../log/client_{i}.log | tail -1',
                 stdout=subprocess.PIPE, shell=True)
             obj_line = obj_subproc.stdout.decode("utf-8").strip()
             if obj_line:
-                fp.write(f"Client {i} Object: {obj_line}\n")
                 payload_bytes = parse_int_field(obj_line, "payload_bytes")
-                live_objects = parse_int_field(obj_line, "live_objects")
                 if payload_bytes is not None:
                     client_payload_bytes.append(payload_bytes)
-                if live_objects is not None:
-                    client_live_objects.append(live_objects)
 
         if dsm_usable_bytes:
             total_used = sum(dsm_used_bytes)
@@ -258,40 +204,12 @@ with open(file_name, 'w') as fp:
                 total_payload = sum(client_payload_bytes)
                 object_eff = 0.0 if total_used == 0 else total_payload * 100.0 / total_used
                 fp.write(f"Approx Object-Level Efficiency: {object_eff:.4f}%\n")
-                fp.write(f"Cluster Live Payload: {format_bytes(total_payload)}\n")
             else:
                 fp.write("Approx Object-Level Efficiency: N/A\n")
-                fp.write("Cluster Live Payload: N/A\n")
         else:
             fp.write("Average Memory Utilization: N/A\n")
             fp.write("Cluster DSM Used: N/A\n")
             fp.write("Approx Object-Level Efficiency: N/A\n")
-            fp.write("Cluster Live Payload: N/A\n")
-
-        if client_live_objects:
-            fp.write(f"Cluster Live Objects: {sum(client_live_objects)}\n")
-        else:
-            fp.write("Cluster Live Objects: N/A\n")
-
-        if server_rss_kb:
-            fp.write(f"Average Server RSS: {sum(server_rss_kb) / len(server_rss_kb):.0f} kB\n")
-        else:
-            fp.write("Average Server RSS: N/A\n")
-
-        if server_hugetlb_kb:
-            fp.write(f"Average Server HugetlbPages: {sum(server_hugetlb_kb) / len(server_hugetlb_kb):.0f} kB\n")
-        else:
-            fp.write("Average Server HugetlbPages: N/A\n")
-
-        if client_rss_kb:
-            fp.write(f"Average Client RSS: {sum(client_rss_kb) / len(client_rss_kb):.0f} kB\n")
-        else:
-            fp.write("Average Client RSS: N/A\n")
-
-        if client_hugetlb_kb:
-            fp.write(f"Average Client HugetlbPages: {sum(client_hugetlb_kb) / len(client_hugetlb_kb):.0f} kB\n")
-        else:
-            fp.write("Average Client HugetlbPages: N/A\n")
 
         fp.write("\n")
         fp.flush()

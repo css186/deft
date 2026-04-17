@@ -1,6 +1,5 @@
 #include "Directory.h"
 #include "Common.h"
-#include "ProcessMemory.h"
 
 #include "connection.h"
 #include "DirectoryConnection.h"
@@ -113,7 +112,6 @@ void Directory::dump_memory_stats() {
       "chunk_bytes=%llu mallocs=%zu\n",
       nodeID, dirID, util, used_bytes, usable_bytes, used_chunks, usable_chunks,
       static_cast<unsigned long long>(define::kChunkSize), malloc_count_);
-  dump_process_memory_stats("server", nodeID);
 
   fflush(stdout);
 }
