@@ -22,7 +22,6 @@
 
 // CXL specific includes
 #include "cxl/dsm_server_cxl.h"
-#include "cxl/dsm_client_cxl.h"
 
 #include <city.h>
 #include <stdlib.h>

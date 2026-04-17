@@ -64,7 +64,9 @@ set(CXL_SHARED_SOURCES
 
 add_library(deft_cxl_lib STATIC ${CXL_SOURCES} ${CXL_SHARED_SOURCES})
 target_include_directories(deft_cxl_lib PUBLIC ${INCLUDE_CXL} ${INCLUDE_BASE})
+target_compile_definitions(deft_cxl_lib PUBLIC DEFT_CXL)
 
 add_executable(deft_cxl ${TEST_SRC_DIR}/deft_cxl.cpp)
 target_include_directories(deft_cxl PRIVATE ${INCLUDE_CXL} ${INCLUDE_BASE})
+target_compile_definitions(deft_cxl PRIVATE DEFT_CXL)
 target_link_libraries(deft_cxl deft_cxl_lib ${CXL_LINK_FLAGS})

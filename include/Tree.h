@@ -1,8 +1,13 @@
 #pragma once
 
 // #include "DSM.h"
+#ifdef DEFT_CXL
+#include "cxl/dsm_client.h"
+#include "cxl/Common.h"
+#else
 #include "dsm_client.h"
 #include "Common.h"
+#endif
 #include <atomic>
 #include <stddef.h>
 #include <city.h>
