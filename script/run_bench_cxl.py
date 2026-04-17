@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+
+import os
+import re
+import subprocess
+import sys
+from itertools import product
+from pathlib import Path
+from time import gmtime, strftime
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BUILD_DIR = REPO_ROOT / "build"
+BINARY = BUILD_DIR / "deft_cxl"
+RESULT_DIR = REPO_ROOT / "result"
+LOG_DIR = REPO_ROOT / "log"
+
+
+# ============================================================
+# CXL placement
+# ============================================================
+# Recommended for current CXL emulation:
+#   CPU threads on NUMA 0
+#   data memory on NUMA 1
+#   lock memory on NUMA 0
+#
+# If you want a layout closer to "both lock and data are remote"
+# like the original RDMA client view, change LOCK_NUMA to 1.
+CPU_NUMA = 0
+DATA_NUMA = 1
+LOCK_NUMA = 0
+
+
+# ============================================================
+# Fixed benchmark parameters
+# ============================================================
+DSM_SIZE_GB = 8
+OPS_PER_THREAD = 1_000_000
+NUM_PREFILL_THREADS = 30
+
+
+# ============================================================
+# Sweep variables
+# Keep these aligned with script/run_bench.py
+# ============================================================
+THREADS_CN_ARR = [30]
+KEY_SPACE_ARR = [400e6]
+READ_RATIO_ARR = [50]
+ZIPF_ARR = [0.99]
+
+# THREADS_CN_ARR = [1] + [i for i in range(3, 31, 3)]
+# KEY_SPACE_ARR = [100e6, 200e6, 800e6, 1200e6]
+# READ_RATIO_ARR = [80, 60, 40, 20, 0]
+# ZIPF_ARR = [0.6, 0.7, 0.8, 0.9]
+
+
+def get_res_name(prefix: str) -> Path:
+    postfix = sys.argv[1] if len(sys.argv) > 1 else ""
+    name = f"{prefix}-{postfix}{strftime('-%m-%d-%H-%M', gmtime())}.txt"
+    return RESULT_DIR / name
+
+
+def ensure_dirs() -> None:
+    RESULT_DIR.mkdir(exist_ok=True)
+    LOG_DIR.mkdir(exist_ok=True)
+
+
+def ensure_binary() -> None:
+    if not BUILD_DIR.exists():
+        raise SystemExit(
+            f"build dir not found: {BUILD_DIR}\n"
+            "Run `mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Release ..` first."
+        )
+
+    subprocess.run(
+        ["cmake", "--build", str(BUILD_DIR), "--target", "deft_cxl", "-j"],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    if not BINARY.exists():
+        raise SystemExit(f"deft_cxl binary not found after build: {BINARY}")
+
+
+def extract_float(pattern: str, text: str):
+    m = re.search(pattern, text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+def parse_metrics(output: str):
+    return {
+        "loading_tp_mops": extract_float(r"Loading Results: TP ([0-9.]+) Mops/s", output),
+        "loading_lat_us": extract_float(r"Loading Results: TP [0-9.]+ Mops/s, Lat ([0-9.]+) us", output),
+        "benchmark_tp_mops": extract_float(r"Benchmark TP: ([0-9.]+) Mops/s", output),
+        "avg_op_ns": extract_float(r"Avg op latency: ([0-9.]+) ns", output),
+        "cache_hit_rate": extract_float(r"Cache hit rate: ([0-9.]+)%", output),
+        "avg_lock_ns": extract_float(r"Avg lock latency: ([0-9.]+) ns", output),
+        "avg_read_page_ns": extract_float(r"Avg read page latency: ([0-9.]+) ns", output),
+        "avg_write_page_ns": extract_float(r"Avg write page latency: ([0-9.]+) ns", output),
+        "final_tp_mops": extract_float(r"Final Results: TP ([0-9.]+) Mops/s", output),
+        "final_lat_us": extract_float(r"Final Results: TP [0-9.]+ Mops/s, Lat ([0-9.]+) us", output),
+    }
+
+
+def build_command(num_threads: int, key_space: int, read_ratio: int, zipf: float):
+    return [
+        "numactl",
+        f"--cpunodebind={CPU_NUMA}",
+        f"--membind={CPU_NUMA}",
+        str(BINARY),
+        f"--dsm_size={DSM_SIZE_GB}",
+        f"--data_numa={DATA_NUMA}",
+        f"--lock_numa={LOCK_NUMA}",
+        f"--num_prefill_threads={NUM_PREFILL_THREADS}",
+        f"--num_bench_threads={num_threads}",
+        f"--ops_per_thread={OPS_PER_THREAD}",
+        f"--key_space={key_space}",
+        f"--read_ratio={read_ratio}",
+        f"--zipf={zipf}",
+    ]
+
+
+def main() -> None:
+    ensure_dirs()
+    ensure_binary()
+
+    result_path = get_res_name("bench_cxl")
+    product_list = list(product(KEY_SPACE_ARR, READ_RATIO_ARR, ZIPF_ARR, THREADS_CN_ARR))
+
+    print(THREADS_CN_ARR)
+    print(KEY_SPACE_ARR)
+    print(READ_RATIO_ARR)
+    print(ZIPF_ARR)
+    print(f"binary: {BINARY}")
+    print(f"summary: {result_path}")
+
+    with result_path.open("w") as fp:
+        fp.write(
+            "job_id\tcpu_numa\tdata_numa\tlock_numa\tdsm_size_gb\tops_per_thread\t"
+            "num_prefill_threads\tnum_bench_threads\tkey_space\tread_ratio\tzipf\t"
+            "loading_tp_mops\tloading_lat_us\tbenchmark_tp_mops\tavg_op_ns\t"
+            "cache_hit_rate\tavg_lock_ns\tavg_read_page_ns\tavg_write_page_ns\t"
+            "final_tp_mops\tfinal_lat_us\tstatus\tlog_file\n"
+        )
+        fp.flush()
+
+        for job_id, (key_space, read_ratio, zipf, num_threads) in enumerate(product_list):
+            key_space = int(key_space)
+            log_path = LOG_DIR / (
+                f"cxl_job{job_id}_th{num_threads}_ks{key_space}_rr{read_ratio}_zipf{zipf}.log"
+            )
+
+            cmd = build_command(num_threads, key_space, read_ratio, zipf)
+            print(
+                f"start job {job_id}: threads={num_threads} key_space={key_space} "
+                f"read_ratio={read_ratio} zipf={zipf}"
+            )
+
+            proc = subprocess.run(
+                cmd,
+                cwd=BUILD_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            output = proc.stdout
+            log_path.write_text(output)
+
+            metrics = parse_metrics(output)
+            status = "ok" if proc.returncode == 0 else f"fail({proc.returncode})"
+
+            fp.write(
+                f"{job_id}\t{CPU_NUMA}\t{DATA_NUMA}\t{LOCK_NUMA}\t{DSM_SIZE_GB}\t{OPS_PER_THREAD}\t"
+                f"{NUM_PREFILL_THREADS}\t{num_threads}\t{key_space}\t{read_ratio}\t{zipf}\t"
+                f"{metrics['loading_tp_mops']}\t{metrics['loading_lat_us']}\t"
+                f"{metrics['benchmark_tp_mops']}\t{metrics['avg_op_ns']}\t"
+                f"{metrics['cache_hit_rate']}\t{metrics['avg_lock_ns']}\t"
+                f"{metrics['avg_read_page_ns']}\t{metrics['avg_write_page_ns']}\t"
+                f"{metrics['final_tp_mops']}\t{metrics['final_lat_us']}\t"
+                f"{status}\t{log_path}\n"
+            )
+            fp.flush()
+
+            if proc.returncode != 0:
+                print(output)
+                raise SystemExit(f"job {job_id} failed, see {log_path}")
+
+            final_line = re.search(r"Final Results:.*", output)
+            if final_line:
+                print(final_line.group(0))
+
+
+if __name__ == "__main__":
+    main()
