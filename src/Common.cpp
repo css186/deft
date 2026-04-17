@@ -7,6 +7,9 @@
 #include <net/if.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <sched.h>
+#include <cstring>
 
 void bindCore(uint16_t core) {
   constexpr int CORE_PER_NUMA = 18;

@@ -19,6 +19,8 @@
 #define _RDMA_H__
 
 // Step 2: Provide the definitions from Rdma.h that Tree.cpp needs
+#include <cstdint>
+
 #include "Debug.h"  // Rdma.h includes Debug.h, so we need it too
 
 constexpr int kOroMax = 3;
