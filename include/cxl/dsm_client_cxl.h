@@ -31,6 +31,16 @@
 #include "LocalAllocator.h"
 #include "RdmaBuffer.h"
 
+// RawMessage 需要在 DSMClient 之前定義，因為 RpcCallDir 使用它
+// 在 CXL 中這只是一個 dummy struct（原版定義在 RawMessageConnection.h）
+struct RawMessage {
+  uint8_t type;
+  uint16_t node_id;
+  uint16_t app_id;
+  GlobalAddress addr;
+  int level;
+} __attribute__((packed));
+
 class DSMClient {
  public:
   /**
@@ -640,7 +650,7 @@ class DSMClient {
   static thread_local uint64_t thread_tag_;
 
   DSMClient(const DSMConfig &conf, DSMServer *server)
-      : conf_(conf), server_(server), app_id_(0), cache_(conf.cache_size) {
+      : conf_(conf), server_(server), app_id_(0), cache_(CacheConfig(conf.cache_size)) {
     dsm_base_ = server->get_base_addr();
     lock_base_ = server->get_lock_addr();
     printf("CXL DSMClient: dsm_base=%p, lock_base=%p\n", dsm_base_, lock_base_);
@@ -709,13 +719,3 @@ class DSMClient {
     }
   }
 };
-
-// 需要在 RawMessage 的定義用於 RpcCallDir
-// 在 CXL 中這只是一個 dummy struct
-struct RawMessage {
-  uint8_t type;
-  uint16_t node_id;
-  uint16_t app_id;
-  GlobalAddress addr;
-  int level;
-} __attribute__((packed));

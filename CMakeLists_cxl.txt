@@ -2,14 +2,18 @@
 #
 # 使用方式：
 #   mkdir build_cxl && cd build_cxl
-#   cmake -DCMAKE_BUILD_TYPE=Release -f ../CMakeLists_cxl.txt ..
+#   cp ../CMakeLists_cxl.txt CMakeLists.txt
+#   cmake -DCMAKE_BUILD_TYPE=Release ..
 #   make -j
+#
+# 注意：cmake 不支持 -f 指定檔名，所以需要把這個檔案複製成 CMakeLists.txt
+# 放到 build 目錄裡使用。
 #
 # 與原版 CMakeLists.txt 的差異：
 #   1. 不 link ibverbs (不需要 RDMA)
 #   2. 不 link memcached (不需要節點發現)
 #   3. 新增 link numa (需要 NUMA 記憶體管理)
-#   4. include path 加入 include/cxl (CXL 版 headers 優先)
+#   4. include path: include/cxl 優先於 include (shim header 機制)
 #   5. 只編譯 CXL 相關的源碼，不編譯 RDMA 源碼
 
 cmake_minimum_required(VERSION 3.5 FATAL_ERROR)
@@ -26,11 +30,11 @@ add_compile_options(-Wall -Wno-deprecated-declarations -Wsign-compare)
 # Include paths
 # ================================================================
 # 重要：include/cxl 放在 include 前面！
-# 這樣當 Tree.h 寫 #include "dsm_client.h" 時...
-# 等等，我們 CXL 版本的 header 名字不同 (dsm_client_cxl.h)
-# 所以 Tree.h 需要改 include 路徑... 或者我們做一個 shim header
-set(INCLUDE_BASE ${PROJECT_SOURCE_DIR}/include)
-set(INCLUDE_CXL ${PROJECT_SOURCE_DIR}/include/cxl)
+# 這樣 Tree.h 的 #include "dsm_client.h" 會找到 include/cxl/dsm_client.h (shim)
+# shim 再 include dsm_client_cxl.h (CXL 實作)
+set(DEFT_ROOT ${CMAKE_CURRENT_LIST_DIR})
+set(INCLUDE_BASE ${DEFT_ROOT}/include)
+set(INCLUDE_CXL ${DEFT_ROOT}/include/cxl)
 include_directories(${INCLUDE_CXL} ${INCLUDE_BASE})
 
 # ================================================================
@@ -38,17 +42,15 @@ include_directories(${INCLUDE_CXL} ${INCLUDE_BASE})
 # ================================================================
 # CXL 專用的源碼
 set(CXL_SOURCES
-  ${PROJECT_SOURCE_DIR}/src/cxl/dsm_client_cxl.cpp
-  # DSMServer 是 header-only (全部在 .h 中)
+  ${DEFT_ROOT}/src/cxl/dsm_client_cxl.cpp
 )
 
 # 共用的源碼 (與 RDMA/CXL 無關的部分)
-# 注意：不能用 GLOB_RECURSE 因為那會包含到 src/rdma/ 下的 RDMA 代碼
 set(SHARED_SOURCES
-  ${PROJECT_SOURCE_DIR}/src/Tree.cpp
-  ${PROJECT_SOURCE_DIR}/src/Common.cpp
-  ${PROJECT_SOURCE_DIR}/src/Cache.cpp
-  ${PROJECT_SOURCE_DIR}/src/Debug.cpp
+  ${DEFT_ROOT}/src/Tree.cpp
+  ${DEFT_ROOT}/src/Common.cpp
+  ${DEFT_ROOT}/src/Cache.cpp
+  ${DEFT_ROOT}/src/Debug.cpp
 )
 
 # 組合成 library
@@ -65,5 +67,5 @@ set(CXL_LINK_FLAGS "-lcityhash -lboost_system -lboost_coroutine -lpthread -lnuma
 # ================================================================
 # Executable
 # ================================================================
-add_executable(deft_cxl_bench ${PROJECT_SOURCE_DIR}/test/deft_cxl.cpp)
+add_executable(deft_cxl_bench ${DEFT_ROOT}/test/deft_cxl.cpp)
 target_link_libraries(deft_cxl_bench ${CXL_LINK_FLAGS})

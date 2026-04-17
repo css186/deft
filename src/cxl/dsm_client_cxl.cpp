@@ -9,6 +9,15 @@
  */
 #include "cxl/dsm_client_cxl.h"
 
+// ================================================================
+// 原本定義在 Directory.cpp 中的全域變數
+// CXL build 不編譯 Directory.cpp，所以需要在這裡提供定義
+// Tree.cpp 通過 extern 引用這些變數
+// ================================================================
+GlobalAddress g_root_ptr = GlobalAddress::Null();
+int g_root_level = -1;
+bool enable_cache = true;
+
 // thread_local 變數定義
 // 每個 thread 有自己的 ID、buffer、allocator
 thread_local int DSMClient::thread_id_ = -1;
