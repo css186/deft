@@ -36,7 +36,12 @@ LOCK_NUMA = 0
 # ============================================================
 DSM_SIZE_GB = 8
 OPS_PER_THREAD = 1_000_000
-NUM_PREFILL_THREADS = 30
+#
+# IMPORTANT:
+# Keep this as None if you want a "1 thread" run to really use one thread
+# end-to-end. The previous fixed value 30 caused the prefill phase to still
+# launch 30 threads even when num_bench_threads=1.
+NUM_PREFILL_THREADS = None
 
 
 # ============================================================
@@ -103,6 +108,9 @@ def parse_metrics(output: str):
 
 
 def build_command(num_threads: int, key_space: int, read_ratio: int, zipf: float):
+    num_prefill_threads = (
+        num_threads if NUM_PREFILL_THREADS is None else NUM_PREFILL_THREADS
+    )
     return [
         "numactl",
         f"--cpunodebind={CPU_NUMA}",
@@ -111,7 +119,7 @@ def build_command(num_threads: int, key_space: int, read_ratio: int, zipf: float
         f"--dsm_size={DSM_SIZE_GB}",
         f"--data_numa={DATA_NUMA}",
         f"--lock_numa={LOCK_NUMA}",
-        f"--num_prefill_threads={NUM_PREFILL_THREADS}",
+        f"--num_prefill_threads={num_prefill_threads}",
         f"--num_bench_threads={num_threads}",
         f"--ops_per_thread={OPS_PER_THREAD}",
         f"--key_space={key_space}",
@@ -146,14 +154,17 @@ def main() -> None:
 
         for job_id, (key_space, read_ratio, zipf, num_threads) in enumerate(product_list):
             key_space = int(key_space)
+            num_prefill_threads = (
+                num_threads if NUM_PREFILL_THREADS is None else NUM_PREFILL_THREADS
+            )
             log_path = LOG_DIR / (
                 f"cxl_job{job_id}_th{num_threads}_ks{key_space}_rr{read_ratio}_zipf{zipf}.log"
             )
 
             cmd = build_command(num_threads, key_space, read_ratio, zipf)
             print(
-                f"start job {job_id}: threads={num_threads} key_space={key_space} "
-                f"read_ratio={read_ratio} zipf={zipf}"
+                f"start job {job_id}: threads={num_threads} prefill_threads={num_prefill_threads} "
+                f"key_space={key_space} read_ratio={read_ratio} zipf={zipf}"
             )
 
             proc = subprocess.run(
@@ -171,7 +182,7 @@ def main() -> None:
 
             fp.write(
                 f"{job_id}\t{CPU_NUMA}\t{DATA_NUMA}\t{LOCK_NUMA}\t{DSM_SIZE_GB}\t{OPS_PER_THREAD}\t"
-                f"{NUM_PREFILL_THREADS}\t{num_threads}\t{key_space}\t{read_ratio}\t{zipf}\t"
+                f"{num_prefill_threads}\t{num_threads}\t{key_space}\t{read_ratio}\t{zipf}\t"
                 f"{metrics['loading_tp_mops']}\t{metrics['loading_lat_us']}\t"
                 f"{metrics['benchmark_tp_mops']}\t{metrics['avg_op_ns']}\t"
                 f"{metrics['cache_hit_rate']}\t{metrics['avg_lock_ns']}\t"
