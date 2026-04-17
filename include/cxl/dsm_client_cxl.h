@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 #include "cxl/CxlCommon.h"
 #include "cxl/dsm_server_cxl.h"
@@ -199,57 +200,15 @@ class DSMClient {
                uint64_t *rdma_buffer, uint64_t mask = ~(0ull),
                bool signal = true, CoroContext *ctx = nullptr) {
     (void)signal; (void)ctx;
-    if (log_sz <= 3) {
-      // 8-byte CAS with mask
-      uint64_t *ptr = (uint64_t *)resolve(gaddr);
-      uint64_t old_val = __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
-      *rdma_buffer = old_val;
-      // 注意：真正的 CAS 嘗試在 CasMaskSync 中做判斷
-    } else {
-      // Extended (>8 byte): 在 CXL 實作中暫時只支持 8-byte
-      fprintf(stderr, "CasMask: log_sz > 3 not fully supported in CXL mode\n");
-      uint64_t *ptr = (uint64_t *)resolve(gaddr);
-      *rdma_buffer = __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
-    }
+    masked_cas_impl(resolve(gaddr), log_sz, equal, val, rdma_buffer, mask);
   }
 
   bool CasMaskSync(GlobalAddress gaddr, int log_sz, uint64_t equal,
                    uint64_t val, uint64_t *rdma_buffer, uint64_t mask = ~(0ull),
                    CoroContext *ctx = nullptr) {
     (void)ctx;
-    if (log_sz <= 3) {
-      uint64_t *ptr = (uint64_t *)resolve(gaddr);
-      while (true) {
-        uint64_t old_val = __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
-        if ((old_val & mask) != (equal & mask)) {
-          *rdma_buffer = old_val;
-          return false;  // 比較失敗
-        }
-        // 構造新值：保留 ~mask 的 bits，替換 mask 的 bits
-        uint64_t new_val = (old_val & ~mask) | (val & mask);
-        if (__sync_bool_compare_and_swap(ptr, old_val, new_val)) {
-          *rdma_buffer = old_val;
-          return true;  // CAS 成功
-        }
-        // spurious failure, retry
-      }
-    } else {
-      CasMask(gaddr, log_sz, equal, val, rdma_buffer, mask);
-      // 對於 >8 byte 的 extended atomic，暫時做 simplified check
-      if (log_sz <= 3) {
-        return (equal & mask) == (*rdma_buffer & mask);
-      } else {
-        uint64_t *eq = (uint64_t *)equal;
-        uint64_t *old = (uint64_t *)rdma_buffer;
-        uint64_t *m = (uint64_t *)mask;
-        for (int i = 0; i < (1 << (log_sz - 3)); i++) {
-          if ((eq[i] & m[i]) != (__bswap_64(old[i]) & m[i])) {
-            return false;
-          }
-        }
-        return true;
-      }
-    }
+    return masked_cas_impl(resolve(gaddr), log_sz, equal, val, rdma_buffer,
+                           mask);
   }
 
   /**
@@ -266,13 +225,8 @@ class DSMClient {
     GlobalAddress cas_gaddr;
     cas_gaddr.raw = cas_ror.dest;
     void *cas_ptr = cas_ror.is_on_chip ? resolve_lock(cas_gaddr) : resolve(cas_gaddr);
-    
-    if (cas_ror.log_sz <= 3) {
-      *(uint64_t *)cas_ror.source =
-          __sync_val_compare_and_swap((uint64_t *)cas_ptr, equal, swap);
-    } else {
-      *(uint64_t *)cas_ror.source = *(uint64_t *)cas_ptr;
-    }
+    masked_cas_impl(cas_ptr, cas_ror.log_sz, equal, swap,
+                    (uint64_t *)cas_ror.source, mask);
 
     // Write part
     GlobalAddress write_gaddr;
@@ -285,20 +239,18 @@ class DSMClient {
                         uint64_t mask, RdmaOpRegion &write_ror,
                         CoroContext *ctx = nullptr) {
     (void)ctx;
-    CasMaskWrite(cas_ror, equal, swap, mask, write_ror);
-    if (cas_ror.log_sz <= 3) {
-      return (equal & mask) == (*(uint64_t *)cas_ror.source & mask);
-    } else {
-      uint64_t *eq = (uint64_t *)equal;
-      uint64_t *old = (uint64_t *)cas_ror.source;
-      uint64_t *m = (uint64_t *)mask;
-      for (int i = 0; i < (1 << (cas_ror.log_sz - 3)); ++i) {
-        if ((eq[i] & m[i]) != (__bswap_64(old[i]) & m[i])) {
-          return false;
-        }
-      }
-      return true;
-    }
+    GlobalAddress cas_gaddr;
+    cas_gaddr.raw = cas_ror.dest;
+    void *cas_ptr = cas_ror.is_on_chip ? resolve_lock(cas_gaddr) : resolve(cas_gaddr);
+    bool ok = masked_cas_impl(cas_ptr, cas_ror.log_sz, equal, swap,
+                              (uint64_t *)cas_ror.source, mask);
+
+    GlobalAddress write_gaddr;
+    write_gaddr.raw = write_ror.dest;
+    void *write_ptr =
+        write_ror.is_on_chip ? resolve_lock(write_gaddr) : resolve(write_gaddr);
+    memcpy(write_ptr, (void *)write_ror.source, write_ror.size);
+    return ok;
   }
 
   /**
@@ -519,31 +471,15 @@ class DSMClient {
                  uint64_t *rdma_buffer, uint64_t mask = ~(0ull),
                  bool signal = true, CoroContext *ctx = nullptr) {
     (void)signal; (void)ctx;
-    uint64_t *lock_ptr = (uint64_t *)resolve_lock(gaddr);
-    *rdma_buffer = __atomic_load_n(lock_ptr, __ATOMIC_SEQ_CST);
+    masked_cas_impl(resolve_lock(gaddr), log_sz, equal, val, rdma_buffer, mask);
   }
 
   bool CasDmMaskSync(GlobalAddress gaddr, int log_sz, uint64_t equal,
                      uint64_t val, uint64_t *rdma_buffer,
                      uint64_t mask = ~(0ull), CoroContext *ctx = nullptr) {
     (void)ctx;
-    if (log_sz <= 3) {
-      uint64_t *ptr = (uint64_t *)resolve_lock(gaddr);
-      while (true) {
-        uint64_t old_val = __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
-        if ((old_val & mask) != (equal & mask)) {
-          *rdma_buffer = old_val;
-          return false;
-        }
-        uint64_t new_val = (old_val & ~mask) | (val & mask);
-        if (__sync_bool_compare_and_swap(ptr, old_val, new_val)) {
-          *rdma_buffer = old_val;
-          return true;
-        }
-      }
-    } else {
-      return (equal & mask) == (*rdma_buffer & mask);
-    }
+    return masked_cas_impl(resolve_lock(gaddr), log_sz, equal, val,
+                           rdma_buffer, mask);
   }
 
   /**
@@ -717,5 +653,51 @@ class DSMClient {
       }
       // CAS failed, retry
     }
+  }
+
+  static bool masked_cas_impl(void *ptr, int log_sz, uint64_t equal,
+                              uint64_t val, uint64_t *rdma_buffer,
+                              uint64_t mask) {
+    if (log_sz <= 3) {
+      uint64_t *word_ptr = (uint64_t *)ptr;
+      while (true) {
+        uint64_t old_val = __atomic_load_n(word_ptr, __ATOMIC_SEQ_CST);
+        if ((old_val & mask) != (equal & mask)) {
+          *rdma_buffer = old_val;
+          return false;
+        }
+        uint64_t new_val = (old_val & ~mask) | (val & mask);
+        if (__sync_bool_compare_and_swap(word_ptr, old_val, new_val)) {
+          *rdma_buffer = old_val;
+          return true;
+        }
+      }
+    }
+
+    const size_t word_cnt = 1ull << (log_sz - 3);
+    auto *eq = (uint64_t *)equal;
+    auto *swap_words = (uint64_t *)val;
+    auto *mask_words = (uint64_t *)mask;
+
+    // Serialize multi-word updates; x86 lacks native atomic masked CAS >8B.
+    static std::mutex striped_mutexes[4096];
+    auto lock_idx = (reinterpret_cast<uintptr_t>(ptr) >> 3) % 4096;
+    std::lock_guard<std::mutex> guard(striped_mutexes[lock_idx]);
+
+    std::vector<uint64_t> old_words(word_cnt);
+    std::vector<uint64_t> new_words(word_cnt);
+    memcpy(old_words.data(), ptr, word_cnt * sizeof(uint64_t));
+
+    for (size_t i = 0; i < word_cnt; ++i) {
+      rdma_buffer[i] = __builtin_bswap64(old_words[i]);
+      if ((eq[i] & mask_words[i]) != (old_words[i] & mask_words[i])) {
+        return false;
+      }
+      new_words[i] =
+          (old_words[i] & ~mask_words[i]) | (swap_words[i] & mask_words[i]);
+    }
+
+    memcpy(ptr, new_words.data(), word_cnt * sizeof(uint64_t));
+    return true;
   }
 };
