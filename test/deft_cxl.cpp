@@ -46,6 +46,8 @@ DEFINE_int32(ops_per_thread, 10 * 1e6, "ops per thread");
 DEFINE_double(prefill_ratio, 1, "prefill ratio");
 DEFINE_double(zipf, 0.99, "zipf");
 DEFINE_int32(dsm_size, 32, "DSM size in GB");
+DEFINE_int32(data_numa, 8, "NUMA node for data memory (CXL memory, should be on remote socket)");
+DEFINE_int32(lock_numa, 0, "NUMA node for lock memory (on-chip, should be on local socket)");
 
 constexpr int NUM_WARMUP_OPS = 1e6;
 constexpr int MEASURE_SAMPLE = 32;
@@ -241,9 +243,11 @@ void thread_run(int id) {
 
 void print_args() {
   printf(
-      "[CXL Mode] DSMSize %dGB, PrefillThreads %d, BenchThreads %d, "
+      "[CXL Mode] DSMSize %dGB, DataNUMA %d, LockNUMA %d, "
+      "PrefillThreads %d, BenchThreads %d, "
       "ReadRatio %d, KeySpace %d, Zipfan %.3lf\n",
-      FLAGS_dsm_size, FLAGS_num_prefill_threads, FLAGS_num_bench_threads,
+      FLAGS_dsm_size, FLAGS_data_numa, FLAGS_lock_numa,
+      FLAGS_num_prefill_threads, FLAGS_num_bench_threads,
       FLAGS_read_ratio, FLAGS_key_space, FLAGS_zipf);
 }
 
@@ -257,7 +261,9 @@ int main(int argc, char *argv[]) {
   // ===========================================================
   DSMConfig server_config;
   server_config.dsm_size = FLAGS_dsm_size;
-  DSMServer *server = DSMServer::GetInstance(server_config);
+  DSMServer *server = DSMServer::GetInstance(server_config,
+                                              FLAGS_data_numa,
+                                              FLAGS_lock_numa);
   printf("=== CXL Memory Server initialized ===\n");
 
   // ===========================================================
