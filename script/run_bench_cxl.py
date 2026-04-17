@@ -42,6 +42,7 @@ OPS_PER_THREAD = 1_000_000
 # end-to-end. The previous fixed value 30 caused the prefill phase to still
 # launch 30 threads even when num_bench_threads=1.
 NUM_PREFILL_THREADS = None
+JOB_TIMEOUT_SEC = 0
 
 
 # ============================================================
@@ -107,6 +108,39 @@ def parse_metrics(output: str):
     }
 
 
+def run_and_stream(cmd, cwd: Path, log_path: Path):
+    collected = []
+    with log_path.open("w") as log_fp:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log_fp.write(line)
+                log_fp.flush()
+                collected.append(line)
+            returncode = proc.wait(timeout=JOB_TIMEOUT_SEC if JOB_TIMEOUT_SEC > 0 else None)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            tail = f"\n[run_bench_cxl] timeout after {JOB_TIMEOUT_SEC} seconds\n"
+            sys.stdout.write(tail)
+            sys.stdout.flush()
+            log_fp.write(tail)
+            log_fp.flush()
+            collected.append(tail)
+            returncode = -9
+        return returncode, "".join(collected)
+
+
 def build_command(num_threads: int, key_space: int, read_ratio: int, zipf: float):
     num_prefill_threads = (
         num_threads if NUM_PREFILL_THREADS is None else NUM_PREFILL_THREADS
@@ -167,18 +201,10 @@ def main() -> None:
                 f"key_space={key_space} read_ratio={read_ratio} zipf={zipf}"
             )
 
-            proc = subprocess.run(
-                cmd,
-                cwd=BUILD_DIR,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            output = proc.stdout
-            log_path.write_text(output)
+            returncode, output = run_and_stream(cmd, BUILD_DIR, log_path)
 
             metrics = parse_metrics(output)
-            status = "ok" if proc.returncode == 0 else f"fail({proc.returncode})"
+            status = "ok" if returncode == 0 else f"fail({returncode})"
 
             fp.write(
                 f"{job_id}\t{CPU_NUMA}\t{DATA_NUMA}\t{LOCK_NUMA}\t{DSM_SIZE_GB}\t{OPS_PER_THREAD}\t"
@@ -192,8 +218,7 @@ def main() -> None:
             )
             fp.flush()
 
-            if proc.returncode != 0:
-                print(output)
+            if returncode != 0:
                 raise SystemExit(f"job {job_id} failed, see {log_path}")
 
             final_line = re.search(r"Final Results:.*", output)
