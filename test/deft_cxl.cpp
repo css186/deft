@@ -68,6 +68,7 @@ double prefill_lat = 0.;
 int MAX_TOTAL_THREADS = 0;
 std::atomic<uint64_t> prefill_ops_done{0};
 uint64_t prefill_target_ops = 0;
+std::atomic<uint64_t> prefill_thread_done[MAX_APP_THREAD];
 
 Tree *tree;
 DSMClient *dsm_client;
@@ -191,11 +192,15 @@ void thread_run(int id) {
       }
       if (++local_progress == 4096) {
         prefill_ops_done.fetch_add(local_progress, std::memory_order_relaxed);
+        prefill_thread_done[id].fetch_add(local_progress,
+                                          std::memory_order_relaxed);
         local_progress = 0;
       }
     }
     if (local_progress != 0) {
       prefill_ops_done.fetch_add(local_progress, std::memory_order_relaxed);
+      prefill_thread_done[id].fetch_add(local_progress,
+                                        std::memory_order_relaxed);
     }
     total_time[id][0] = total_timer.end();
     total_time[id][1] = prefill_keys.size();
@@ -216,6 +221,24 @@ void thread_run(int id) {
             std::chrono::duration<double>(now - start).count();
         printf("[prefill] %.1fs %lu / %lu (%.1f%%)\n", elapsed, done,
                prefill_target_ops, pct);
+        if (FLAGS_num_prefill_threads > 0) {
+          int stalled_tid = -1;
+          uint64_t min_done = UINT64_MAX;
+          uint64_t max_done = 0;
+          for (int i = 0; i < FLAGS_num_prefill_threads; ++i) {
+            uint64_t tdone =
+                prefill_thread_done[i].load(std::memory_order_relaxed);
+            if (tdone < min_done) {
+              min_done = tdone;
+              stalled_tid = i;
+            }
+            if (tdone > max_done) {
+              max_done = tdone;
+            }
+          }
+          printf("[prefill-thread] slowest tid=%d done=%lu fastest=%lu spread=%lu\n",
+                 stalled_tid, min_done, max_done, max_done - min_done);
+        }
         fflush(stdout);
         next_report = now + std::chrono::seconds(5);
       }
@@ -253,6 +276,9 @@ void thread_run(int id) {
 
     prefill_cnt.store(0);
     prefill_ops_done.store(0, std::memory_order_relaxed);
+    for (int i = 0; i < MAX_APP_THREAD; ++i) {
+      prefill_thread_done[i].store(0, std::memory_order_relaxed);
+    }
   }
 
   while (prefill_cnt.load() != 0)
