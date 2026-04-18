@@ -45,6 +45,13 @@
 // #define USE_CORO
 const int kCoroCnt = 3;
 
+// #define YCSB_D
+// #define YCSB_E
+
+#if defined(USE_CORO) && defined(YCSB_E)
+#error "USE_CORO and YCSB_E cannot be defined at the same time"
+#endif
+
 DEFINE_int32(num_prefill_threads, 1, "prefill thread");
 DEFINE_int32(num_bench_threads, 1, "bench thread");
 DEFINE_int32(read_ratio, 50, "read ratio");
@@ -56,6 +63,7 @@ DEFINE_int32(dsm_size, 32, "DSM size in GB");
 DEFINE_int32(data_numa, 8, "NUMA node for data memory (CXL memory, should be on remote socket)");
 DEFINE_int32(lock_numa, 0, "NUMA node for lock memory (on-chip, should be on local socket)");
 
+constexpr double YCSBD_READ_RANGE = 0.02;
 constexpr int NUM_WARMUP_OPS = 1e6;
 constexpr int MEASURE_SAMPLE = 32;
 
@@ -127,14 +135,46 @@ class RequsetGenBench : public RequstGen {
       : coro_id(coro_id), dsm_client_(dsm_client), thread_id_(thread_id) {
     seed = (dsm_client->get_my_client_id() << 10) + (thread_id_ << 5) + coro_id;
     mehcached_zipf_init(&state, FLAGS_key_space, FLAGS_zipf, seed);
+#ifdef YCSB_D
+    uint64_t window = FLAGS_key_space * YCSBD_READ_RANGE;
+    uint64_t all_thread =
+        FLAGS_num_bench_threads * dsm_client_->get_client_size();
+    uint64_t my_id =
+        FLAGS_num_bench_threads * dsm_client_->get_my_client_id() + thread_id_;
+    ycsbd_cur_key_ =
+        static_cast<uint64_t>(FLAGS_key_space * FLAGS_prefill_ratio) + window +
+        my_id;
+#endif
   }
 
   Request next() override {
     Request r;
     r.is_search = rand_r(&seed) % 100 < FLAGS_read_ratio;
+    r.is_scan = false;
+#ifdef YCSB_D
+    {
+      uint64_t window = FLAGS_key_space * YCSBD_READ_RANGE;
+      uint64_t all_thread =
+          FLAGS_num_bench_threads * dsm_client_->get_client_size();
+      if (r.is_search) {
+        r.k = to_key((ycsbd_cur_key_ + FLAGS_key_space - all_thread -
+                      rand_r(&seed) % window) %
+                     FLAGS_key_space);
+      } else {
+        r.k = to_key(ycsbd_cur_key_);
+        ycsbd_cur_key_ = (ycsbd_cur_key_ + all_thread) % FLAGS_key_space;
+      }
+      r.v = 23 + ycsbd_cur_key_ + seed;
+      return r;
+    }
+#endif
+
     uint64_t dis = mehcached_zipf_next(&state);
     r.k = to_key(dis);
     r.v = 23 + dis + seed;
+#ifdef YCSB_E
+    r.is_scan = r.is_search;
+#endif
     return r;
   }
 
@@ -144,10 +184,50 @@ class RequsetGenBench : public RequstGen {
   int thread_id_;
   unsigned int seed;
   struct zipf_gen_state state;
+#ifdef YCSB_D
+  uint64_t ycsbd_cur_key_ = 0;
+#endif
 };
 
 RequstGen *coro_func(int coro_id, DSMClient *dsm_client, int id) {
   return new RequsetGenBench(coro_id, dsm_client, id);
+}
+
+void run_ycsb_d(int id) {
+  uint32_t seed = (dsm_client->get_my_client_id() << 10) + id;
+  uint64_t window = FLAGS_key_space * YCSBD_READ_RANGE;
+  uint64_t all_thread = FLAGS_num_bench_threads * dsm_client->get_client_size();
+  uint64_t my_id =
+      FLAGS_num_bench_threads * dsm_client->get_my_client_id() + id;
+  uint64_t cur_key =
+      static_cast<uint64_t>(FLAGS_key_space * FLAGS_prefill_ratio) + window +
+      my_id;
+
+  Timer timer;
+  Timer total_timer;
+  total_timer.begin();
+  for (int i = 0; i < FLAGS_ops_per_thread; ++i) {
+    Value v;
+    bool measure_lat = i % MEASURE_SAMPLE == 0;
+    if (measure_lat) {
+      timer.begin();
+    }
+    if (rand_r(&seed) % 100 < FLAGS_read_ratio) {
+      uint64_t k =
+          (cur_key + FLAGS_key_space - all_thread - rand_r(&seed) % window) %
+          FLAGS_key_space;
+      tree->search(to_key(k), v);
+    } else {
+      v = 12;
+      tree->insert(to_key(cur_key), v);
+      cur_key = (cur_key + all_thread) % FLAGS_key_space;
+    }
+    if (measure_lat) {
+      auto t = timer.end();
+      stat_helper.add(id, lat_op, t);
+    }
+  }
+  total_time[id][0] = total_timer.end();
 }
 
 // =================== Benchmark Thread ===================
@@ -198,13 +278,28 @@ void thread_run(int id) {
         local_progress = 0;
       }
     }
+#ifdef YCSB_D
+    {
+      uint64_t window = FLAGS_key_space * YCSBD_READ_RANGE;
+      for (uint64_t i = end_prefill_key + my_id; i < end_prefill_key + window;
+           i += all_prefill_threads) {
+        tree->insert(to_key(i), i * 2);
+        if (++local_progress == 4096) {
+          prefill_ops_done.fetch_add(local_progress, std::memory_order_relaxed);
+          prefill_thread_done[id].fetch_add(local_progress,
+                                            std::memory_order_relaxed);
+          local_progress = 0;
+        }
+      }
+    }
+#endif
     if (local_progress != 0) {
       prefill_ops_done.fetch_add(local_progress, std::memory_order_relaxed);
       prefill_thread_done[id].fetch_add(local_progress,
                                         std::memory_order_relaxed);
     }
     total_time[id][0] = total_timer.end();
-    total_time[id][1] = prefill_keys.size();
+    total_time[id][1] = prefill_thread_done[id].load(std::memory_order_relaxed);
   }
   prefill_cnt.fetch_add(1);
 
@@ -299,9 +394,19 @@ void thread_run(int id) {
                       FLAGS_ops_per_thread);
   total_time[id][0] = total_timer.end();
 #else
+#ifdef YCSB_D
+  {
+    run_ycsb_d(id);
+    return;
+  }
+#endif
+
   uint32_t seed = (dsm_client->get_my_client_id() << 10) + id;
   struct zipf_gen_state state;
   mehcached_zipf_init(&state, FLAGS_key_space, FLAGS_zipf, seed);
+#ifdef YCSB_E
+  thread_local Value scan_buffer[101];
+#endif
 
   // warmup
   for (int i = 0; i < NUM_WARMUP_OPS; ++i) {
@@ -309,7 +414,11 @@ void thread_run(int id) {
     uint64_t key = to_key(dis);
     Value v;
     if (rand_r(&seed) % 100 < FLAGS_read_ratio) {
+#ifdef YCSB_E
+      tree->range_query(key, key + 100, scan_buffer, 100);
+#else
       tree->search(key, v);
+#endif
     } else {
       v = 12;
       tree->insert(key, v);
@@ -328,7 +437,11 @@ void thread_run(int id) {
 
     Value v;
     if (rand_r(&seed) % 100 < FLAGS_read_ratio) {
+#ifdef YCSB_E
+      tree->range_query(key, key + 100, scan_buffer, 100);
+#else
       tree->search(key, v);
+#endif
     } else {
       v = 12;
       tree->insert(key, v);
@@ -360,11 +473,19 @@ int main(int argc, char *argv[]) {
   setvbuf(stderr, nullptr, _IOLBF, 0);
   install_fatal_handlers();
   gflags::ParseCommandLineFlags(&argc, &argv, true);
+
   print_args();
+
+#ifdef YCSB_D
+  FLAGS_prefill_ratio = 0.90;
+#endif
 
   MAX_TOTAL_THREADS =
       std::max(FLAGS_num_prefill_threads, FLAGS_num_bench_threads);
   prefill_target_ops = (uint64_t)(FLAGS_prefill_ratio * FLAGS_key_space);
+#ifdef YCSB_D
+  prefill_target_ops += (uint64_t)(FLAGS_key_space * YCSBD_READ_RANGE);
+#endif
   prefill_phase_done.store(false, std::memory_order_relaxed);
   if (MAX_TOTAL_THREADS > MAX_APP_THREAD) {
     fprintf(stderr,
