@@ -16,7 +16,9 @@
 
 #define USE_SX_LOCK
 #define BATCH_LOCK_READ
+#ifndef DEFT_CXL
 #define FINE_GRAINED_LEAF_NODE
+#endif
 #define FINE_GRAINED_INTERNAL_NODE
 // #define USE_CRC
 // #define USE_LOCAL_LOCK
