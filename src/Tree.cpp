@@ -79,6 +79,28 @@ static inline int cxl_leaf_cas_retry_limit() {
 #endif
 }
 
+static inline bool cxl_coro_should_yield(uint64_t retry_cnt) {
+#ifdef DEFT_CXL
+  // CXL path is synchronous, so only yield when we observe sustained retries.
+  return (retry_cnt & 0xf) == 0;
+#else
+  (void)retry_cnt;
+  return false;
+#endif
+}
+
+static inline void cxl_coro_yield(CoroContext *ctx) {
+#ifdef DEFT_CXL
+  if (ctx != nullptr) {
+    (*ctx->yield)(*ctx->master);
+  }
+#else
+  (void)ctx;
+#endif
+}
+
+constexpr uint32_t kCxlCoroOpsPerSlice = 8;
+
 #ifdef USE_LOCAL_LOCK
 thread_local std::queue<uint16_t> hot_wait_queue;
 #endif
@@ -321,6 +343,9 @@ retry:
   } else {
     ++retry_cnt;
     cxl_lock_wait_backoff(retry_cnt);
+    if (cxl_coro_should_yield(retry_cnt)) {
+      cxl_coro_yield(ctx);
+    }
     if (retry_cnt > cxl_lock_retry_limit()) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
@@ -537,6 +562,9 @@ retry:
   } else {
     ++retry_cnt;
     cxl_lock_wait_backoff(retry_cnt);
+    if (cxl_coro_should_yield(retry_cnt)) {
+      cxl_coro_yield(ctx);
+    }
     if (retry_cnt > cxl_lock_retry_limit()) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
@@ -1870,6 +1898,9 @@ retry_insert:
 #endif
       assert(false);
     }
+    if (cxl_coro_should_yield(retry_cnt)) {
+      cxl_coro_yield(ctx);
+    }
     goto retry_insert;
   }
 
@@ -1995,6 +2026,9 @@ retry_insert_2:
 #endif
 #endif
       assert(false);
+    }
+    if (cxl_coro_should_yield(retry_cnt)) {
+      cxl_coro_yield(ctx);
     }
     assert(share_lock);
     goto retry_insert_2;
@@ -2215,6 +2249,7 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
 
   Timer coro_timer;
   auto thread_id = dsm_client_->get_my_thread_id();
+  uint32_t ops_in_slice = 0;
 
   // while (true) {
   while (coro_ops_cnt_start < coro_ops_total) {
@@ -2240,6 +2275,13 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
     // latency[thread_id][us_10]++;
     stat_helper.add(thread_id, lat_op, t);
     ++coro_ops_cnt_finish;
+#ifdef DEFT_CXL
+    if (++ops_in_slice >= kCxlCoroOpsPerSlice &&
+        coro_ops_cnt_finish < coro_ops_total) {
+      ops_in_slice = 0;
+      yield(master);
+    }
+#endif
   }
   // printf("thread %d coro_id %d start %lu finish %lu\n",
   //        dsm_client_->get_my_thread_id(), coro_id, coro_ops_cnt_start,
@@ -2249,6 +2291,18 @@ void Tree::coro_worker(CoroYield &yield, RequstGen *gen, int coro_id,
 }
 
 void Tree::coro_master(CoroYield &yield, int coro_cnt) {
+#ifdef DEFT_CXL
+  // RDMA's CQ-driven scheduler does not apply to synchronous CXL operations.
+  // Use a minimal round-robin scheduler so coroutines only help with
+  // contention/backoff paths instead of pretending there is async I/O.
+  while (coro_ops_cnt_finish < coro_ops_total) {
+    for (int i = 0; i < coro_cnt && coro_ops_cnt_finish < coro_ops_total; ++i) {
+      if (worker[i]) {
+        yield(worker[i]);
+      }
+    }
+  }
+#else
   for (int i = 0; i < coro_cnt; ++i) {
     yield(worker[i]);
   }
@@ -2267,6 +2321,7 @@ void Tree::coro_master(CoroYield &yield, int coro_cnt) {
     //   yield(worker[next_coro_id]);
     // }
   }
+#endif
   // printf("thread %d master start %lu finish %lu\n",
   //        dsm_client_->get_my_thread_id(), coro_ops_cnt_start,
   //        coro_ops_cnt_finish);
