@@ -18,7 +18,9 @@
 class IndexCache;
 extern uint64_t cache_miss[MAX_APP_THREAD][8];
 extern uint64_t cache_hit[MAX_APP_THREAD][8];
+#ifndef DEFT_CXL
 extern uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+#endif
 
 static inline uint32_t crc32(const char *buf, size_t len) {
   boost::crc_32_type result;

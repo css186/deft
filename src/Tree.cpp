@@ -24,7 +24,9 @@
 
 uint64_t cache_miss[MAX_APP_THREAD][8];
 uint64_t cache_hit[MAX_APP_THREAD][8];
+#ifndef DEFT_CXL
 uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
+#endif
 
 StatHelper stat_helper;
 
@@ -177,14 +179,14 @@ bool Tree::update_new_root(GlobalAddress left, const Key &k,
   if (dsm_client_->CasSync(root_ptr_ptr, old_root, new_root_addr, cas_buffer,
                            ctx)) {
     // broadcast_new_root(new_root_addr, level);
-    printf("new root level %d [%d, %ld]\n", level, new_root_addr.nodeID,
+    printf("new root level %d [%lu, %lu]\n", level, new_root_addr.nodeID,
            new_root_addr.offset);
     g_root_ptr = new_root_addr;
     return true;
   } else {
     printf(
-        "cas root fail: left [%d,%lu] right [%d,%lu] old root [%d,%lu] try new "
-        "root [%d,%lu]\n",
+        "cas root fail: left [%lu,%lu] right [%lu,%lu] old root [%lu,%lu] try new "
+        "root [%lu,%lu]\n",
         left.nodeID, left.offset, right.nodeID, right.offset, old_root.nodeID,
         old_root.offset, new_root_addr.nodeID, new_root_addr.offset);
   }
@@ -289,7 +291,7 @@ retry:
     ++retry_cnt;
     if (retry_cnt > 5000000) {
       printf(
-          "Deadlock [%u, %lu] my thread %d coro_id %d try %d lock upgrade "
+          "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
           "%d\n",
           lock_addr.nodeID, lock_addr.offset, dsm_client_->get_my_thread_id(),
           ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
@@ -504,7 +506,7 @@ retry:
     ++retry_cnt;
     if (retry_cnt > 5000000) {
       printf(
-          "Deadlock [%u, %lu] my thread %d coro_id %d try %d lock upgrade "
+          "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
           "%d\n",
           lock_addr.nodeID, lock_addr.offset, dsm_client_->get_my_thread_id(),
           ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
@@ -541,7 +543,7 @@ retry:
     rs[1].size = read_size;
     rs[1].is_on_chip = false;
     if (retry_cnt > 5000000) {
-      printf("Deadlock [%u, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
+      printf("Deadlock [%lu, %lu] my thread %d coro_id %d\n", lock_addr.nodeID,
              lock_addr.offset, dsm_client_->get_my_thread_id(),
              ctx ? ctx->coro_id : 0);
       fflush(stdout);
