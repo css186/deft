@@ -30,7 +30,6 @@
 #include <city.h>
 #include <execinfo.h>
 #include <exception>
-#include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <thread>
@@ -38,7 +37,6 @@
 #include <unistd.h>
 #include <vector>
 #include <random>
-#include <sys/resource.h>
 
 // =================== Workload Parameters ===================
 // 和原版 client.cpp 完全一樣
@@ -109,49 +107,6 @@ void install_fatal_handlers() {
   signal(SIGBUS, cxl_fatal_signal_handler);
   signal(SIGILL, cxl_fatal_signal_handler);
   signal(SIGFPE, cxl_fatal_signal_handler);
-}
-
-void shrink_process_stack_limit() {
-  struct rlimit rl;
-  if (getrlimit(RLIMIT_STACK, &rl) != 0) {
-    return;
-  }
-  const rlim_t target = 1ull << 20;  // 1 MiB
-  if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > target) {
-    rl.rlim_cur = target;
-    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < rl.rlim_cur) {
-      rl.rlim_cur = rl.rlim_max;
-    }
-    setrlimit(RLIMIT_STACK, &rl);
-  }
-}
-
-void configure_worker_thread_stack() {
-#ifdef __linux__
-  pthread_attr_t attr;
-  if (pthread_attr_init(&attr) != 0) {
-    return;
-  }
-
-  size_t stack_size = 1ull << 20;  // 1 MiB
-  if (stack_size < PTHREAD_STACK_MIN) {
-    stack_size = PTHREAD_STACK_MIN;
-  }
-
-  if (pthread_attr_setstacksize(&attr, stack_size) == 0) {
-    long page_sz = sysconf(_SC_PAGESIZE);
-    if (page_sz > 0) {
-      pthread_attr_setguardsize(&attr, (size_t)page_sz);
-    }
-    if (pthread_setattr_default_np(&attr) == 0) {
-      fprintf(stderr,
-              "CXL benchmark: configured default worker stack size to %zu KB\n",
-              stack_size / 1024);
-    }
-  }
-
-  pthread_attr_destroy(&attr);
-#endif
 }
 
 }  // namespace
@@ -345,9 +300,9 @@ void print_args() {
 }
 
 int main(int argc, char *argv[]) {
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+  setvbuf(stderr, nullptr, _IOLBF, 0);
   install_fatal_handlers();
-  shrink_process_stack_limit();
-  configure_worker_thread_stack();
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   print_args();
 
