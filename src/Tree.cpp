@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <queue>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -47,6 +48,16 @@ constexpr uint64_t ADD_S_LOCK = 1;
 constexpr uint64_t ADD_S_UNLOCK = 1ul << 16;
 constexpr uint64_t ADD_X_LOCK = 1ul << 32;
 constexpr uint64_t ADD_X_UNLOCK = 1ul << 48;
+
+static inline void cxl_lock_wait_backoff(uint64_t retry_cnt) {
+#ifdef DEFT_CXL
+  if ((retry_cnt & 0x3ff) == 0) {
+    std::this_thread::yield();
+  }
+#else
+  (void)retry_cnt;
+#endif
+}
 
 #ifdef DEFT_CXL
 static std::atomic<int> cxl_x_lock_owner[MAX_MACHINE][define::kNumOfLock];
@@ -325,6 +336,7 @@ retry:
     // ok
   } else {
     ++retry_cnt;
+    cxl_lock_wait_backoff(retry_cnt);
     if (retry_cnt > 5000000) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
@@ -553,6 +565,7 @@ retry:
     // ok
   } else {
     ++retry_cnt;
+    cxl_lock_wait_backoff(retry_cnt);
     if (retry_cnt > 5000000) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
