@@ -5,7 +5,6 @@
 #include <chrono>
 #include <iostream>
 #include <queue>
-#include <shared_mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -16,9 +15,7 @@
 
 #define USE_SX_LOCK
 #define BATCH_LOCK_READ
-#ifndef DEFT_CXL
 #define FINE_GRAINED_LEAF_NODE
-#endif
 #define FINE_GRAINED_INTERNAL_NODE
 // #define USE_CRC
 // #define USE_LOCAL_LOCK
@@ -73,18 +70,6 @@ static inline uint64_t cxl_lock_retry_limit() {
   return 5000000ull;
 #endif
 }
-
-#ifdef DEFT_CXL
-static inline size_t cxl_lock_index(GlobalAddress lock_addr) {
-  return lock_addr.offset / define::kLockSize;
-}
-
-static std::shared_mutex cxl_rw_locks[MAX_MACHINE][define::kNumOfLock];
-
-static inline std::shared_mutex &cxl_get_rw_lock(GlobalAddress lock_addr) {
-  return cxl_rw_locks[lock_addr.nodeID][cxl_lock_index(lock_addr)];
-}
-#endif
 
 #ifdef USE_LOCAL_LOCK
 thread_local std::queue<uint16_t> hot_wait_queue;
@@ -299,24 +284,6 @@ inline void Tree::acquire_sx_lock(GlobalAddress lock_addr,
                                   uint64_t *lock_buffer, CoroContext *ctx,
                                   bool share_lock, bool upgrade_from_s) {
   assert(!upgrade_from_s || !share_lock);
-#ifdef DEFT_CXL
-  (void)lock_buffer;
-  (void)ctx;
-  Timer timer;
-  timer.begin();
-  auto &rw_lock = cxl_get_rw_lock(lock_addr);
-  if (share_lock) {
-    rw_lock.lock_shared();
-  } else {
-    if (upgrade_from_s) {
-      rw_lock.unlock_shared();
-    }
-    rw_lock.lock();
-  }
-  uint64_t t = timer.end();
-  stat_helper.add(dsm_client_->get_my_thread_id(), lat_lock, t);
-  return;
-#else
   uint64_t add_val;
   if (share_lock) {
     add_val = ADD_S_LOCK;
@@ -365,24 +332,11 @@ retry:
   }
   uint64_t t = timer.end();
   stat_helper.add(dsm_client_->get_my_thread_id(), lat_lock, t);
-#endif
 }
 
 inline void Tree::release_sx_lock(GlobalAddress lock_addr,
                                   uint64_t *lock_buffer, CoroContext *ctx,
                                   bool async, bool share_lock) {
-#ifdef DEFT_CXL
-  (void)lock_buffer;
-  (void)ctx;
-  (void)async;
-  auto &rw_lock = cxl_get_rw_lock(lock_addr);
-  if (share_lock) {
-    rw_lock.unlock_shared();
-  } else {
-    rw_lock.unlock();
-  }
-  return;
-#else
   uint64_t add_val = share_lock ? ADD_S_UNLOCK : ADD_X_UNLOCK;
   if (async) {
     dsm_client_->FaaDmBound(lock_addr, 3, add_val, lock_buffer,
@@ -391,7 +345,6 @@ inline void Tree::release_sx_lock(GlobalAddress lock_addr,
     dsm_client_->FaaDmBoundSync(lock_addr, 3, add_val, lock_buffer,
                                 XS_LOCK_FAA_MASK, ctx);
   }
-#endif
 }
 
 inline void Tree::acquire_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
@@ -407,10 +360,6 @@ inline void Tree::acquire_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
 inline void Tree::release_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
                                CoroContext *ctx, bool async, bool share_lock) {
 #ifdef USE_SX_LOCK
-#ifdef DEFT_CXL
-  release_sx_lock(lock_addr, lock_buffer, ctx, async, share_lock);
-  return;
-#else
   uint64_t add_val = share_lock ? ADD_S_UNLOCK : ADD_X_UNLOCK;
   if (async) {
     dsm_client_->FaaDmBound(lock_addr, 3, add_val, lock_buffer,
@@ -419,7 +368,6 @@ inline void Tree::release_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
     dsm_client_->FaaDmBoundSync(lock_addr, 3, add_val, lock_buffer,
                                 XS_LOCK_FAA_MASK, ctx);
   }
-#endif
 #else
 
 #ifdef USE_LOCAL_LOCK
@@ -552,15 +500,6 @@ void Tree::lock_and_read(GlobalAddress lock_addr, bool share_lock,
 #ifdef BATCH_LOCK_READ
 
 #ifdef USE_SX_LOCK
-#ifdef DEFT_CXL
-  Timer timer;
-  timer.begin();
-  acquire_sx_lock(lock_addr, lock_buffer, ctx, share_lock, upgrade_from_s);
-  dsm_client_->ReadSync(read_buffer, read_addr, read_size, ctx);
-  uint64_t t = timer.end();
-  stat_helper.add(dsm_client_->get_my_thread_id(), lat_read_page, t);
-  return;
-#else
   assert(!upgrade_from_s || !share_lock);
   uint64_t add_val;
   if (share_lock) {
@@ -610,7 +549,6 @@ retry:
     x_cnt = (*lock_buffer >> 48) & 0xffff;
     goto retry;
   }
-#endif
 
 #else  // not sx lock
   RdmaOpRegion rs[2];
