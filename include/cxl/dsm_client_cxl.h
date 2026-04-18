@@ -76,12 +76,14 @@ class DSMClient {
     const auto &history = lock_history();
     size_t head = lock_history_head().load(std::memory_order_relaxed);
     size_t cap = history.size();
+    bool found = false;
     for (size_t i = 0; i < cap; ++i) {
       size_t idx = (head + i) % cap;
       const auto &e = history[idx];
       if (!e.valid || e.offset != offset) {
         continue;
       }
+      found = true;
       uint16_t old_s_tic, old_s_cur, old_x_tic, old_x_cur;
       uint16_t new_s_tic, new_s_cur, new_x_tic, new_x_cur;
       decode_lock(e.old_val, old_s_tic, old_s_cur, old_x_tic, old_x_cur);
@@ -93,6 +95,31 @@ class DSMClient {
               e.seq, e.thread_id, e.op, e.offset, e.add_val, e.old_val,
               old_s_tic, old_s_cur, old_x_tic, old_x_cur, e.new_val,
               new_s_tic, new_s_cur, new_x_tic, new_x_cur);
+    }
+    if (!found) {
+      fprintf(stderr,
+              "[LOCK-HISTORY] no exact entries for off=%lu, dumping last global X-lock transitions\n",
+              offset);
+      constexpr size_t kFallbackDump = 256;
+      size_t start = (head + cap - std::min(cap, kFallbackDump)) % cap;
+      for (size_t i = 0; i < std::min(cap, kFallbackDump); ++i) {
+        size_t idx = (start + i) % cap;
+        const auto &e = history[idx];
+        if (!e.valid) {
+          continue;
+        }
+        uint16_t old_s_tic, old_s_cur, old_x_tic, old_x_cur;
+        uint16_t new_s_tic, new_s_cur, new_x_tic, new_x_cur;
+        decode_lock(e.old_val, old_s_tic, old_s_cur, old_x_tic, old_x_cur);
+        decode_lock(e.new_val, new_s_tic, new_s_cur, new_x_tic, new_x_cur);
+        fprintf(stderr,
+                "[LOCK-HISTORY] seq=%lu th=%d op=%s off=%lu add=0x%lx "
+                "old=0x%016lx [s_tic=%u s_cur=%u x_tic=%u x_cur=%u] "
+                "new=0x%016lx [s_tic=%u s_cur=%u x_tic=%u x_cur=%u]\n",
+                e.seq, e.thread_id, e.op, e.offset, e.add_val, e.old_val,
+                old_s_tic, old_s_cur, old_x_tic, old_x_cur, e.new_val,
+                new_s_tic, new_s_cur, new_x_tic, new_x_cur);
+      }
     }
     fflush(stderr);
   }
@@ -761,8 +788,8 @@ class DSMClient {
     return (add_val & ((1ull << 32) | (1ull << 48))) != 0;
   }
 
-  static std::array<LockTraceEntry, 8192> &lock_history() {
-    static std::array<LockTraceEntry, 8192> history{};
+  static std::array<LockTraceEntry, 131072> &lock_history() {
+    static std::array<LockTraceEntry, 131072> history{};
     return history;
   }
 
