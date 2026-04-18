@@ -71,6 +71,14 @@ static inline uint64_t cxl_lock_retry_limit() {
 #endif
 }
 
+static inline int cxl_leaf_cas_retry_limit() {
+#ifdef DEFT_CXL
+  return 32;
+#else
+  return 10;
+#endif
+}
+
 #ifdef USE_LOCAL_LOCK
 thread_local std::queue<uint16_t> hot_wait_queue;
 #endif
@@ -1809,8 +1817,17 @@ retry_insert:
     }
     insert_addr->lv.raw = cas_ret_buffer[0];
 #endif
-    if (++retry_cnt > 10) {
+    if (++retry_cnt > cxl_leaf_cas_retry_limit()) {
       printf("retry insert %d times\n", retry_cnt);
+#ifdef DEFT_CXL
+#ifdef USE_SX_LOCK
+      if (share_lock) {
+        upgrade_from_s = true;
+        share_lock = false;
+        goto retry_with_xlock;
+      }
+#endif
+#endif
       assert(false);
     }
     goto retry_insert;
@@ -1926,6 +1943,19 @@ retry_insert_2:
     }
     insert_addr->lv.raw = cas_ret_buffer[0];
 #endif
+    if (++retry_cnt > cxl_leaf_cas_retry_limit()) {
+      printf("retry insert %d times\n", retry_cnt);
+#ifdef DEFT_CXL
+#ifdef USE_SX_LOCK
+      if (share_lock) {
+        upgrade_from_s = true;
+        share_lock = false;
+        goto retry_with_xlock;
+      }
+#endif
+#endif
+      assert(false);
+    }
     assert(share_lock);
     goto retry_insert_2;
   }
