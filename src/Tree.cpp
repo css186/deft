@@ -159,44 +159,20 @@ GlobalAddress Tree::get_root_ptr_ptr() {
   return addr;
 }
 
-#ifdef DEFT_CXL
-extern std::atomic<uint64_t> g_root_ptr_raw;
-#else
 extern GlobalAddress g_root_ptr;
-#endif
 extern int g_root_level;
 extern bool enable_cache;
-
-static inline GlobalAddress load_cached_root_ptr() {
-#ifdef DEFT_CXL
-  GlobalAddress root;
-  root.raw = g_root_ptr_raw.load(std::memory_order_acquire);
-  return root;
-#else
-  return g_root_ptr;
-#endif
-}
-
-static inline void store_cached_root_ptr(GlobalAddress root) {
-#ifdef DEFT_CXL
-  g_root_ptr_raw.store(root.raw, std::memory_order_release);
-#else
-  g_root_ptr = root;
-#endif
-}
-
 GlobalAddress Tree::get_root_ptr(CoroContext *ctx, bool force_read) {
-  GlobalAddress cached_root = load_cached_root_ptr();
-  if (force_read || cached_root == GlobalAddress::Null()) {
+  if (force_read || g_root_ptr == GlobalAddress::Null()) {
     char *page_buffer =
         (dsm_client_->get_rbuf(ctx ? ctx->coro_id : 0)).get_page_buffer();
     dsm_client_->ReadSync(page_buffer, root_ptr_ptr, sizeof(GlobalAddress),
                           ctx);
     GlobalAddress root_ptr = *(GlobalAddress *)page_buffer;
-    store_cached_root_ptr(root_ptr);
+    g_root_ptr = root_ptr;
     return root_ptr;
   } else {
-    return cached_root;
+    return g_root_ptr;
   }
 
   // std::cout << "root ptr " << root_ptr << std::endl;
@@ -236,7 +212,7 @@ bool Tree::update_new_root(GlobalAddress left, const Key &k,
     // broadcast_new_root(new_root_addr, level);
     printf("new root level %d [%lu, %lu]\n", level, new_root_addr.nodeID,
            new_root_addr.offset);
-    store_cached_root_ptr(new_root_addr);
+    g_root_ptr = new_root_addr;
     return true;
   } else {
     printf(
@@ -1142,9 +1118,8 @@ re_read:
 bool Tree::page_search(GlobalAddress page_addr, int level_hint, int read_gran,
                        Key min, Key max, const Key &k, SearchResult &result,
                        CoroContext *ctx, bool from_cache) {
-  GlobalAddress cached_root = load_cached_root_ptr();
 #ifdef FINE_GRAINED_LEAF_NODE
-  if (page_addr != cached_root && level_hint == 0) {
+  if (page_addr != g_root_ptr && level_hint == 0) {
     return leaf_page_group_search(page_addr, k, result, ctx, from_cache);
   }
 #endif
@@ -1182,7 +1157,7 @@ re_read:
     // has header
     result.is_leaf = hdr->level == 0;
     result.level = hdr->level;
-    if (page_addr == cached_root) {
+    if (page_addr == g_root_ptr) {
       if (hdr->is_root == false) {
         // update root ptr
         get_root_ptr(ctx, true);
@@ -1413,7 +1388,6 @@ inline void Tree::internal_page_slice_search(InternalEntry *entries, int cnt,
 void Tree::internal_page_update(GlobalAddress page_addr, const Key &k,
                                 GlobalAddress value, int level,
                                 CoroContext *ctx, bool sx_lock) {
-retry:
   GlobalAddress lock_addr = get_lock_addr(page_addr);
 
   auto &rbuf = dsm_client_->get_rbuf(ctx ? ctx->coro_id : 0);
@@ -1435,25 +1409,12 @@ retry:
   assert(k >= page->hdr.lowest);
   if (k == page->hdr.lowest) {
     assert(page->hdr.leftmost_ptr == value);
-    uint64_t old = page->hdr.leftmost_ptr.raw;
-    if (old == value.raw) {
-      release_lock(lock_addr, lock_buffer, ctx, true, sx_lock);
-      return;
-    }
-    uint64_t *cas_buffer = rbuf.get_cas_buffer();
-    bool ok = dsm_client_->CasSync(
-        GADD(page_addr, (char *)&page->hdr.leftmost_ptr - page_buffer), old,
-        value.raw, cas_buffer, ctx);
-    release_lock(lock_addr, lock_buffer, ctx, true, sx_lock);
-    if (ok) {
-      return;
-    }
-    GlobalAddress cur;
-    cur.raw = *cas_buffer;
-    if (cur == value) {
-      return;
-    }
-    goto retry;
+    page->hdr.leftmost_ptr = value;
+    char *modfiy = (char *)&page->hdr.leftmost_ptr;
+    write_and_unlock(modfiy, GADD(page_addr, (modfiy - page_buffer)),
+                     sizeof(GlobalAddress), lock_buffer, lock_addr, ctx, true,
+                     sx_lock);
+    return;
   } else {
     int group_id = get_key_group(k, page->hdr.lowest, page->hdr.highest);
     uint8_t cur_group_gran = page->hdr.read_gran;
@@ -1472,25 +1433,12 @@ retry:
 
     for (int i = begin_idx; i < end_idx; ++i) {
       if (page->records[i].ptr == value && page->records[i].key == k) {
-        uint64_t old = page->records[i].ptr.raw;
-        if (old == value.raw) {
-          release_lock(lock_addr, lock_buffer, ctx, true, sx_lock);
-          return;
-        }
-        uint64_t *cas_buffer = rbuf.get_cas_buffer();
-        bool ok = dsm_client_->CasSync(
-            GADD(page_addr, (char *)&page->records[i].ptr - page_buffer), old,
-            value.raw, cas_buffer, ctx);
-        release_lock(lock_addr, lock_buffer, ctx, true, sx_lock);
-        if (ok) {
-          return;
-        }
-        GlobalAddress cur;
-        cur.raw = *cas_buffer;
-        if (cur == value) {
-          return;
-        }
-        goto retry;
+        page->records[i].ptr = value;
+        char *modify = (char *)&page->records[i].ptr;
+        write_and_unlock(modify, GADD(page_addr, (modify - page_buffer)),
+                         sizeof(GlobalAddress), lock_buffer, lock_addr, ctx,
+                         true, sx_lock);
+        return;
       }
     }
   }
