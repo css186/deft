@@ -254,6 +254,15 @@ int main(int argc, char *argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   print_args();
 
+  MAX_TOTAL_THREADS =
+      std::max(FLAGS_num_prefill_threads, FLAGS_num_bench_threads);
+  if (MAX_TOTAL_THREADS > MAX_APP_THREAD) {
+    fprintf(stderr,
+            "CXL benchmark requires %d threads, but MAX_APP_THREAD=%d\n",
+            MAX_TOTAL_THREADS, MAX_APP_THREAD);
+    return 1;
+  }
+
   // ===========================================================
   // Step 1: 初始化 Server（分配 CXL 記憶體）
   // 原版中這是在另一台機器上的獨立進程
@@ -269,7 +278,12 @@ int main(int argc, char *argv[]) {
   // Step 2: 初始化 Client
   // ===========================================================
   DSMConfig client_config;
-  client_config.cache_size = 1;  // local cache size in GB
+  uint64_t required_rbuf_bytes =
+      (uint64_t)MAX_TOTAL_THREADS * define::kPerThreadRdmaBuf;
+  client_config.cache_size =
+      std::max<uint32_t>(1, (required_rbuf_bytes + define::GB - 1) / define::GB);
+  printf("CXL DSMClient: allocating %u GB local buffer cache for %d threads\n",
+         client_config.cache_size, MAX_TOTAL_THREADS);
   dsm_client = DSMClient::GetInstance(client_config, server);
 
   // 主線程先註冊
@@ -291,8 +305,6 @@ int main(int argc, char *argv[]) {
   // ===========================================================
   // Step 4: 啟動 benchmark 線程
   // ===========================================================
-  MAX_TOTAL_THREADS =
-      std::max(FLAGS_num_prefill_threads, FLAGS_num_bench_threads);
   for (int i = 1; i < MAX_TOTAL_THREADS; i++) {
     th[i] = std::thread(thread_run, i);
   }
