@@ -706,13 +706,17 @@ next:
 void Tree::insert(const Key &k, const Value &v, CoroContext *ctx) {
   assert(dsm_client_->IsRegistered());
   int coro_id = ctx ? ctx->coro_id : 0;
+  int thread_id = dsm_client_->get_my_thread_id();
 
   before_operation(ctx, coro_id);
 
   Key min = kKeyMin;
   Key max = kKeyMax;
+  bool cache_epoch_active = false;
 
   if (enable_cache) {
+    index_cache->thread_status->rcu_progress(thread_id);
+    cache_epoch_active = true;
     GlobalAddress cache_addr, parent_addr;
     auto entry = index_cache->search_from_cache(k, &cache_addr, &parent_addr);
     if (entry) {  // cache hit
@@ -724,13 +728,19 @@ void Tree::insert(const Key &k, const Value &v, CoroContext *ctx) {
       bool status = leaf_page_store(cache_addr, k, v, root, 0, ctx, true);
 #endif
       if (status) {
-        cache_hit[dsm_client_->get_my_thread_id()][0]++;
+        cache_hit[thread_id][0]++;
+        index_cache->thread_status->rcu_exit(thread_id);
         return;
       }
       // cache stale, from root,
-      index_cache->invalidate(entry, dsm_client_->get_my_thread_id());
+      index_cache->invalidate(entry, thread_id);
+      index_cache->thread_status->rcu_exit(thread_id);
+      cache_epoch_active = false;
+    } else {
+      index_cache->thread_status->rcu_exit(thread_id);
+      cache_epoch_active = false;
     }
-    cache_miss[dsm_client_->get_my_thread_id()][0]++;
+    cache_miss[thread_id][0]++;
   }
 
   auto root = get_root_ptr(ctx);
@@ -791,10 +801,14 @@ next:
     }
   }
   // }
+  if (cache_epoch_active) {
+    index_cache->thread_status->rcu_exit(thread_id);
+  }
 }
 
 bool Tree::search(const Key &k, Value &v, CoroContext *ctx, int coro_id) {
   assert(dsm_client_->IsRegistered());
+  int thread_id = dsm_client_->get_my_thread_id();
 
   auto p = get_root_ptr(ctx);
   SearchResult result;
@@ -805,18 +819,23 @@ bool Tree::search(const Key &k, Value &v, CoroContext *ctx, int coro_id) {
 
   bool from_cache = false;
   const CacheEntry *entry = nullptr;
+  bool cache_epoch_active = false;
   if (enable_cache) {
+    index_cache->thread_status->rcu_progress(thread_id);
+    cache_epoch_active = true;
     // Timer timer;
     // timer.begin();
     GlobalAddress cache_addr, parent_addr;
     entry = index_cache->search_from_cache(k, &cache_addr, &parent_addr);
     if (entry) {  // cache hit
-      cache_hit[dsm_client_->get_my_thread_id()][0]++;
+      cache_hit[thread_id][0]++;
       from_cache = true;
       p = cache_addr;
       level_hint = 0;
     } else {
-      cache_miss[dsm_client_->get_my_thread_id()][0]++;
+      cache_miss[thread_id][0]++;
+      index_cache->thread_status->rcu_exit(thread_id);
+      cache_epoch_active = false;
     }
     // auto t = timer.end();
     // stat_helper.add(dsm_client_->get_my_thread_id(), lat_cache_search, t);
@@ -826,9 +845,11 @@ next:
   if (!page_search(p, level_hint, p.read_gran, min, max, k, result, ctx,
                    from_cache)) {
     if (from_cache) {  // cache stale
-      index_cache->invalidate(entry, dsm_client_->get_my_thread_id());
-      cache_hit[dsm_client_->get_my_thread_id()][0]--;
-      cache_miss[dsm_client_->get_my_thread_id()][0]++;
+      index_cache->invalidate(entry, thread_id);
+      cache_hit[thread_id][0]--;
+      cache_miss[thread_id][0]++;
+      index_cache->thread_status->rcu_exit(thread_id);
+      cache_epoch_active = false;
       from_cache = false;
 
       p = get_root_ptr(ctx);
@@ -844,6 +865,9 @@ next:
   if (result.is_leaf) {
     if (result.val != kValueNull) {  // find
       v = result.val;
+      if (cache_epoch_active) {
+        index_cache->thread_status->rcu_exit(thread_id);
+      }
       return true;
     }
     if (result.sibling != GlobalAddress::Null()) {  // turn right
@@ -851,6 +875,9 @@ next:
       min = result.next_min; // remain the max
       level_hint = 0;
       goto next;
+    }
+    if (cache_epoch_active) {
+      index_cache->thread_status->rcu_exit(thread_id);
     }
     return false;  // not found
   } else {         // internal
@@ -985,23 +1012,33 @@ int Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
 
 void Tree::del(const Key &k, CoroContext *ctx, int coro_id) {
   assert(dsm_client_->IsRegistered());
+  int thread_id = dsm_client_->get_my_thread_id();
 
   before_operation(ctx, coro_id);
   Key min = kKeyMin;
   Key max = kKeyMax;
+  bool cache_epoch_active = false;
 
   if (enable_cache) {
+    index_cache->thread_status->rcu_progress(thread_id);
+    cache_epoch_active = true;
     GlobalAddress cache_addr, parent_addr;
     auto entry = index_cache->search_from_cache(k, &cache_addr, &parent_addr);
     if (entry) {  // cache hit
       if (leaf_page_del(cache_addr, k, 0, ctx, coro_id, true)) {
-        cache_hit[dsm_client_->get_my_thread_id()][0]++;
+        cache_hit[thread_id][0]++;
+        index_cache->thread_status->rcu_exit(thread_id);
         return;
       }
       // cache stale, from root,
-      index_cache->invalidate(entry, dsm_client_->get_my_thread_id());
+      index_cache->invalidate(entry, thread_id);
+      index_cache->thread_status->rcu_exit(thread_id);
+      cache_epoch_active = false;
+    } else {
+      index_cache->thread_status->rcu_exit(thread_id);
+      cache_epoch_active = false;
     }
-    cache_miss[dsm_client_->get_my_thread_id()][0]++;
+    cache_miss[thread_id][0]++;
   }
 
   auto root = get_root_ptr(ctx);
@@ -1041,6 +1078,9 @@ next:
   }
 
   leaf_page_del(p, k, 0, ctx, coro_id);
+  if (cache_epoch_active) {
+    index_cache->thread_status->rcu_exit(thread_id);
+  }
 }
 
 bool Tree::leaf_page_group_search(GlobalAddress page_addr, const Key &k,

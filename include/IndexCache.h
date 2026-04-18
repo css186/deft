@@ -151,6 +151,7 @@ inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
 
     return true;
   } else {  // conflicted
+    thread_status->rcu_progress(thread_id);
     auto e = this->find_entry(page->hdr.lowest, page->hdr.highest);
     if (e && e->from == page->hdr.lowest && e->to == page->hdr.highest - 1) {
       auto ptr = e->ptr;
@@ -177,9 +178,11 @@ inline bool IndexCache::add_to_cache(InternalPage *page, int thread_id) {
               std::make_pair(ptr, asm_rdtsc()));
           delay_free_lists[thread_id].lock.wUnlock();
         }
+        thread_status->rcu_exit(thread_id);
         return true;
       }
     }
+    thread_status->rcu_exit(thread_id);
 
     free(new_page);
     return false;
@@ -193,6 +196,7 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, int group_id,
   InternalPage *new_page = (InternalPage *)malloc(kInternalPageSize);
   // memset(new_page, 0, kInternalPageSize);
 
+  thread_status->rcu_progress(thread_id);
   auto e = this->find_entry(min, max);
   if (e && e->from == min && e->to == max - 1) {  // update sub-node
     InternalPage *ptr = e->ptr;
@@ -254,6 +258,7 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, int group_id,
             std::make_pair(ptr, asm_rdtsc()));
         delay_free_lists[thread_id].lock.wUnlock();
       }
+      thread_status->rcu_exit(thread_id);
       return true;
     }
   } else {
@@ -291,9 +296,11 @@ inline bool IndexCache::add_sub_node(GlobalAddress addr, int group_id,
       if (v <= 0) {
         evict_one(thread_id);
       }
+      thread_status->rcu_exit(thread_id);
       return true;
     }
   }
+  thread_status->rcu_exit(thread_id);
   free(new_page);
   return false;
 }
