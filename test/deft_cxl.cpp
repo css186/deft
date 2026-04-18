@@ -32,6 +32,7 @@
 #include <exception>
 #include <signal.h>
 #include <stdlib.h>
+#include <chrono>
 #include <thread>
 #include <time.h>
 #include <unistd.h>
@@ -65,6 +66,8 @@ uint64_t total_time[MAX_APP_THREAD][8];
 double prefill_tp = 0.;
 double prefill_lat = 0.;
 int MAX_TOTAL_THREADS = 0;
+std::atomic<uint64_t> prefill_ops_done{0};
+uint64_t prefill_target_ops = 0;
 
 Tree *tree;
 DSMClient *dsm_client;
@@ -175,6 +178,7 @@ void thread_run(int id) {
     std::shuffle(prefill_keys.begin(), prefill_keys.end(),
                  std::default_random_engine(my_id));
     total_timer.begin();
+    uint64_t local_progress = 0;
     for (size_t i = 0; i < prefill_keys.size(); ++i) {
       bool measure_lat = i % MEASURE_SAMPLE == 0;
       if (measure_lat) {
@@ -185,6 +189,13 @@ void thread_run(int id) {
         auto t = timer.end();
         stat_helper.add(id, lat_op, t);
       }
+      if (++local_progress == 4096) {
+        prefill_ops_done.fetch_add(local_progress, std::memory_order_relaxed);
+        local_progress = 0;
+      }
+    }
+    if (local_progress != 0) {
+      prefill_ops_done.fetch_add(local_progress, std::memory_order_relaxed);
     }
     total_time[id][0] = total_timer.end();
     total_time[id][1] = prefill_keys.size();
@@ -192,8 +203,24 @@ void thread_run(int id) {
   prefill_cnt.fetch_add(1);
 
   if (id == 0) {
-    while (prefill_cnt.load() != MAX_TOTAL_THREADS)
-      ;
+    auto start = std::chrono::steady_clock::now();
+    auto next_report = start + std::chrono::seconds(5);
+    while (prefill_cnt.load() != MAX_TOTAL_THREADS) {
+      auto now = std::chrono::steady_clock::now();
+      if (now >= next_report) {
+        uint64_t done = prefill_ops_done.load(std::memory_order_relaxed);
+        double pct = prefill_target_ops == 0
+                         ? 0.0
+                         : 100.0 * (double)done / (double)prefill_target_ops;
+        double elapsed =
+            std::chrono::duration<double>(now - start).count();
+        printf("[prefill] %.1fs %lu / %lu (%.1f%%)\n", elapsed, done,
+               prefill_target_ops, pct);
+        fflush(stdout);
+        next_report = now + std::chrono::seconds(5);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     printf("prefill time %lds\n", total_time[0][0] / 1000 / 1000 / 1000);
     prefill_tp = 0.;
     uint64_t hit = 0;
@@ -225,6 +252,7 @@ void thread_run(int id) {
     memset(reinterpret_cast<void *>(&stat_helper), 0, sizeof(stat_helper));
 
     prefill_cnt.store(0);
+    prefill_ops_done.store(0, std::memory_order_relaxed);
   }
 
   while (prefill_cnt.load() != 0)
@@ -308,6 +336,7 @@ int main(int argc, char *argv[]) {
 
   MAX_TOTAL_THREADS =
       std::max(FLAGS_num_prefill_threads, FLAGS_num_bench_threads);
+  prefill_target_ops = (uint64_t)(FLAGS_prefill_ratio * FLAGS_key_space);
   if (MAX_TOTAL_THREADS > MAX_APP_THREAD) {
     fprintf(stderr,
             "CXL benchmark requires %d threads, but MAX_APP_THREAD=%d\n",
