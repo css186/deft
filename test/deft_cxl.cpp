@@ -1,3 +1,7 @@
+#ifdef __linux__
+#define _GNU_SOURCE
+#endif
+
 /**
  * deft_cxl.cpp - CXL 版本的 benchmark 入口
  * 
@@ -24,12 +28,17 @@
 #include "cxl/dsm_server_cxl.h"
 
 #include <city.h>
+#include <execinfo.h>
+#include <exception>
+#include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <thread>
 #include <time.h>
 #include <unistd.h>
 #include <vector>
 #include <random>
+#include <sys/resource.h>
 
 // =================== Workload Parameters ===================
 // 和原版 client.cpp 完全一樣
@@ -61,6 +70,91 @@ int MAX_TOTAL_THREADS = 0;
 
 Tree *tree;
 DSMClient *dsm_client;
+
+namespace {
+
+[[noreturn]] void cxl_fatal_signal_handler(int sig) {
+  void *frames[64];
+  int n = backtrace(frames, 64);
+  fprintf(stderr, "\n[FATAL] received signal %d\n", sig);
+  backtrace_symbols_fd(frames, n, STDERR_FILENO);
+  fflush(stderr);
+  _exit(128 + sig);
+}
+
+[[noreturn]] void cxl_terminate_handler() {
+  fprintf(stderr, "\n[FATAL] std::terminate invoked\n");
+  if (auto ep = std::current_exception()) {
+    try {
+      std::rethrow_exception(ep);
+    } catch (const std::exception &e) {
+      fprintf(stderr, "[FATAL] uncaught exception: %s\n", e.what());
+    } catch (...) {
+      fprintf(stderr, "[FATAL] uncaught non-std exception\n");
+    }
+  } else {
+    fprintf(stderr, "[FATAL] no active exception\n");
+  }
+  void *frames[64];
+  int n = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, n, STDERR_FILENO);
+  fflush(stderr);
+  abort();
+}
+
+void install_fatal_handlers() {
+  std::set_terminate(cxl_terminate_handler);
+  signal(SIGABRT, cxl_fatal_signal_handler);
+  signal(SIGSEGV, cxl_fatal_signal_handler);
+  signal(SIGBUS, cxl_fatal_signal_handler);
+  signal(SIGILL, cxl_fatal_signal_handler);
+  signal(SIGFPE, cxl_fatal_signal_handler);
+}
+
+void shrink_process_stack_limit() {
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_STACK, &rl) != 0) {
+    return;
+  }
+  const rlim_t target = 1ull << 20;  // 1 MiB
+  if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > target) {
+    rl.rlim_cur = target;
+    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < rl.rlim_cur) {
+      rl.rlim_cur = rl.rlim_max;
+    }
+    setrlimit(RLIMIT_STACK, &rl);
+  }
+}
+
+void configure_worker_thread_stack() {
+#ifdef __linux__
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) != 0) {
+    return;
+  }
+
+  size_t stack_size = 1ull << 20;  // 1 MiB
+  if (stack_size < PTHREAD_STACK_MIN) {
+    stack_size = PTHREAD_STACK_MIN;
+  }
+
+  if (pthread_attr_setstacksize(&attr, stack_size) == 0) {
+    long page_sz = sysconf(_SC_PAGESIZE);
+    if (page_sz > 0) {
+      pthread_attr_setguardsize(&attr, (size_t)page_sz);
+    }
+    if (pthread_setattr_default_np(&attr) == 0) {
+      fprintf(stderr,
+              "CXL benchmark: configured default worker stack size to %zu KB\n",
+              stack_size / 1024);
+    }
+  }
+
+  pthread_attr_destroy(&attr);
+#endif
+}
+
+}  // namespace
 
 inline Key to_key(uint64_t k) {
   return (CityHash64((char *)&k, sizeof(k))) % FLAGS_key_space + 1;
@@ -251,6 +345,9 @@ void print_args() {
 }
 
 int main(int argc, char *argv[]) {
+  install_fatal_handlers();
+  shrink_process_stack_limit();
+  configure_worker_thread_stack();
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   print_args();
 

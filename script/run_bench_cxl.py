@@ -2,6 +2,7 @@
 
 import os
 import re
+import signal
 import subprocess
 import sys
 from itertools import product
@@ -144,6 +145,16 @@ def run_and_stream(cmd, cwd: Path, log_path: Path, env=None):
         return returncode, "".join(collected)
 
 
+def describe_returncode(returncode: int) -> str:
+    if returncode >= 0:
+        return f"exit({returncode})"
+    sig = -returncode
+    try:
+        return f"signal({sig}:{signal.Signals(sig).name})"
+    except Exception:
+        return f"signal({sig})"
+
+
 def build_command(num_threads: int, key_space: int, read_ratio: int, zipf: float):
     num_prefill_threads = (
         num_threads if NUM_PREFILL_THREADS is None else NUM_PREFILL_THREADS
@@ -228,6 +239,12 @@ def main() -> None:
             fp.flush()
 
             if returncode != 0:
+                tail = "\n".join(output.splitlines()[-40:])
+                print(f"job {job_id} failed with {describe_returncode(returncode)}")
+                if tail:
+                    print("----- log tail -----")
+                    print(tail)
+                    print("--------------------")
                 raise SystemExit(f"job {job_id} failed, see {log_path}")
 
             final_line = re.search(r"Final Results:.*", output)
