@@ -69,6 +69,7 @@ int MAX_TOTAL_THREADS = 0;
 std::atomic<uint64_t> prefill_ops_done{0};
 uint64_t prefill_target_ops = 0;
 std::atomic<uint64_t> prefill_thread_done[MAX_APP_THREAD];
+std::atomic<bool> prefill_phase_done{false};
 
 Tree *tree;
 DSMClient *dsm_client;
@@ -242,7 +243,7 @@ void thread_run(int id) {
         fflush(stdout);
         next_report = now + std::chrono::seconds(5);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     printf("prefill time %lds\n", total_time[0][0] / 1000 / 1000 / 1000);
     prefill_tp = 0.;
@@ -274,15 +275,16 @@ void thread_run(int id) {
     tree->clear_statistics();
     memset(reinterpret_cast<void *>(&stat_helper), 0, sizeof(stat_helper));
 
-    prefill_cnt.store(0);
+    prefill_phase_done.store(true, std::memory_order_release);
     prefill_ops_done.store(0, std::memory_order_relaxed);
     for (int i = 0; i < MAX_APP_THREAD; ++i) {
       prefill_thread_done[i].store(0, std::memory_order_relaxed);
     }
   }
 
-  while (prefill_cnt.load() != 0)
-    ;
+  while (!prefill_phase_done.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 
   // ---- Benchmark ----
   if (id >= FLAGS_num_bench_threads) {
@@ -363,6 +365,7 @@ int main(int argc, char *argv[]) {
   MAX_TOTAL_THREADS =
       std::max(FLAGS_num_prefill_threads, FLAGS_num_bench_threads);
   prefill_target_ops = (uint64_t)(FLAGS_prefill_ratio * FLAGS_key_space);
+  prefill_phase_done.store(false, std::memory_order_relaxed);
   if (MAX_TOTAL_THREADS > MAX_APP_THREAD) {
     fprintf(stderr,
             "CXL benchmark requires %d threads, but MAX_APP_THREAD=%d\n",
