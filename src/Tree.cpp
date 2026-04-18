@@ -48,6 +48,42 @@ constexpr uint64_t ADD_S_UNLOCK = 1ul << 16;
 constexpr uint64_t ADD_X_LOCK = 1ul << 32;
 constexpr uint64_t ADD_X_UNLOCK = 1ul << 48;
 
+#ifdef DEFT_CXL
+static std::atomic<int> cxl_x_lock_owner[MAX_MACHINE][define::kNumOfLock];
+static std::atomic<uint16_t> cxl_x_lock_ticket[MAX_MACHINE][define::kNumOfLock];
+
+static inline size_t cxl_lock_index(GlobalAddress lock_addr) {
+  return lock_addr.offset / define::kLockSize;
+}
+
+static inline void cxl_note_x_lock_owner(GlobalAddress lock_addr, int thread_id,
+                                         uint16_t x_ticket) {
+  size_t idx = cxl_lock_index(lock_addr);
+  cxl_x_lock_owner[lock_addr.nodeID][idx].store(thread_id,
+                                                std::memory_order_relaxed);
+  cxl_x_lock_ticket[lock_addr.nodeID][idx].store(x_ticket,
+                                                 std::memory_order_relaxed);
+}
+
+static inline void cxl_clear_x_lock_owner(GlobalAddress lock_addr) {
+  size_t idx = cxl_lock_index(lock_addr);
+  cxl_x_lock_owner[lock_addr.nodeID][idx].store(-1, std::memory_order_relaxed);
+  cxl_x_lock_ticket[lock_addr.nodeID][idx].store(0, std::memory_order_relaxed);
+}
+
+static inline void cxl_print_x_lock_owner(GlobalAddress lock_addr) {
+  size_t idx = cxl_lock_index(lock_addr);
+  int owner =
+      cxl_x_lock_owner[lock_addr.nodeID][idx].load(std::memory_order_relaxed);
+  uint16_t ticket =
+      cxl_x_lock_ticket[lock_addr.nodeID][idx].load(std::memory_order_relaxed);
+  fprintf(stderr,
+          "[LOCK-OWNER] off=%lu owner_thread=%d owner_ticket=%u\n",
+          lock_addr.offset, owner, ticket);
+  fflush(stderr);
+}
+#endif
+
 #ifdef USE_LOCAL_LOCK
 thread_local std::queue<uint16_t> hot_wait_queue;
 #endif
@@ -297,6 +333,9 @@ retry:
           ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
       printf("s [%u, %u] x [%u, %u]\n", s_tic, s_cnt, x_tic, x_cnt);
       fflush(stdout);
+#ifdef DEFT_CXL
+      cxl_print_x_lock_owner(lock_addr);
+#endif
       DSMClient::DumpRecentLockTrace(lock_addr.offset);
       assert(false);
       exit(-1);
@@ -306,6 +345,11 @@ retry:
     x_cnt = (*lock_buffer >> 48) & 0xffff;
     goto retry;
   }
+#ifdef DEFT_CXL
+  if (!share_lock) {
+    cxl_note_x_lock_owner(lock_addr, dsm_client_->get_my_thread_id(), x_tic);
+  }
+#endif
   uint64_t t = timer.end();
   stat_helper.add(dsm_client_->get_my_thread_id(), lat_lock, t);
 }
@@ -321,6 +365,11 @@ inline void Tree::release_sx_lock(GlobalAddress lock_addr,
     dsm_client_->FaaDmBoundSync(lock_addr, 3, add_val, lock_buffer,
                                 XS_LOCK_FAA_MASK, ctx);
   }
+#ifdef DEFT_CXL
+  if (!share_lock) {
+    cxl_clear_x_lock_owner(lock_addr);
+  }
+#endif
 }
 
 inline void Tree::acquire_lock(GlobalAddress lock_addr, uint64_t *lock_buffer,
@@ -512,6 +561,9 @@ retry:
           ctx ? ctx->coro_id : 0, share_lock, upgrade_from_s);
       printf("s [%u, %u] x [%u, %u]\n", s_tic, s_cnt, x_tic, x_cnt);
       fflush(stdout);
+#ifdef DEFT_CXL
+      cxl_print_x_lock_owner(lock_addr);
+#endif
       DSMClient::DumpRecentLockTrace(lock_addr.offset);
       assert(false);
       exit(-1);
