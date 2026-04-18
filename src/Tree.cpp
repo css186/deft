@@ -2,6 +2,7 @@
 
 #include <city.h>
 #include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <queue>
 #include <thread>
@@ -51,11 +52,22 @@ constexpr uint64_t ADD_X_UNLOCK = 1ul << 48;
 
 static inline void cxl_lock_wait_backoff(uint64_t retry_cnt) {
 #ifdef DEFT_CXL
-  if ((retry_cnt & 0x3ff) == 0) {
+  if ((retry_cnt & 0x3f) == 0) {
     std::this_thread::yield();
+  }
+  if ((retry_cnt & 0xffff) == 0) {
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
   }
 #else
   (void)retry_cnt;
+#endif
+}
+
+static inline uint64_t cxl_lock_retry_limit() {
+#ifdef DEFT_CXL
+  return 500000000ull;
+#else
+  return 5000000ull;
 #endif
 }
 
@@ -337,7 +349,7 @@ retry:
   } else {
     ++retry_cnt;
     cxl_lock_wait_backoff(retry_cnt);
-    if (retry_cnt > 5000000) {
+    if (retry_cnt > cxl_lock_retry_limit()) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
           "%d\n",
@@ -566,7 +578,7 @@ retry:
   } else {
     ++retry_cnt;
     cxl_lock_wait_backoff(retry_cnt);
-    if (retry_cnt > 5000000) {
+    if (retry_cnt > cxl_lock_retry_limit()) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
           "%d\n",
