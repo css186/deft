@@ -79,26 +79,6 @@ static inline int cxl_leaf_cas_retry_limit() {
 #endif
 }
 
-static inline bool cxl_coro_should_yield(uint64_t retry_cnt) {
-#ifdef DEFT_CXL
-  // CXL path is synchronous, so only yield when we observe sustained retries.
-  return (retry_cnt & 0xf) == 0;
-#else
-  (void)retry_cnt;
-  return false;
-#endif
-}
-
-static inline void cxl_coro_yield(CoroContext *ctx) {
-#ifdef DEFT_CXL
-  if (ctx != nullptr) {
-    (*ctx->yield)(*ctx->master);
-  }
-#else
-  (void)ctx;
-#endif
-}
-
 constexpr uint32_t kCxlCoroOpsPerSlice = 8;
 
 #ifdef USE_LOCAL_LOCK
@@ -343,9 +323,6 @@ retry:
   } else {
     ++retry_cnt;
     cxl_lock_wait_backoff(retry_cnt);
-    if (cxl_coro_should_yield(retry_cnt)) {
-      cxl_coro_yield(ctx);
-    }
     if (retry_cnt > cxl_lock_retry_limit()) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
@@ -562,9 +539,6 @@ retry:
   } else {
     ++retry_cnt;
     cxl_lock_wait_backoff(retry_cnt);
-    if (cxl_coro_should_yield(retry_cnt)) {
-      cxl_coro_yield(ctx);
-    }
     if (retry_cnt > cxl_lock_retry_limit()) {
       printf(
           "Deadlock [%lu, %lu] my thread %d coro_id %d try %d lock upgrade "
@@ -1898,9 +1872,6 @@ retry_insert:
 #endif
       assert(false);
     }
-    if (cxl_coro_should_yield(retry_cnt)) {
-      cxl_coro_yield(ctx);
-    }
     goto retry_insert;
   }
 
@@ -2026,9 +1997,6 @@ retry_insert_2:
 #endif
 #endif
       assert(false);
-    }
-    if (cxl_coro_should_yield(retry_cnt)) {
-      cxl_coro_yield(ctx);
     }
     assert(share_lock);
     goto retry_insert_2;

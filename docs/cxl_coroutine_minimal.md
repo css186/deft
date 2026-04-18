@@ -30,54 +30,14 @@ constraints:
 
 The goal is not to build a full shared-memory task scheduler. The goal is only
 to make `USE_CORO` meaningful under `DEFT_CXL` by converting it from an
-I/O-overlap mechanism into a contention-relief mechanism.
+I/O-overlap mechanism into a conservative cooperative scheduler that is safe for
+shared-memory execution.
 
 ## What Was Changed
 
 All changes are localized to [src/Tree.cpp](../src/Tree.cpp).
 
-### 1. Added a CXL-specific yield policy
-
-Two helper functions were added near the top of `Tree.cpp`:
-
-- `cxl_coro_should_yield(uint64_t retry_cnt)`
-- `cxl_coro_yield(CoroContext *ctx)`
-
-The first helper decides when a retry loop should yield. The current policy is
-intentionally simple: yield once every 16 retries. This keeps the implementation
-small and avoids yielding on every transient retry.
-
-The second helper performs a coroutine yield only when a coroutine context is
-present. This keeps the normal non-coroutine path unchanged.
-
-### 2. Added yielding to lock contention paths
-
-The original RDMA version spins in retry loops while waiting for lock state to
-become compatible. Under CXL, this becomes local busy waiting. To avoid wasting
-an entire worker thread on one hot lock, the CXL coroutine path now yields from
-these retry loops after repeated failures:
-
-- `acquire_sx_lock()`
-- `lock_and_read()`
-
-The lock protocol itself is unchanged. The thread still retries the same lock
-operation; the only difference is that after enough retries it temporarily gives
-control to another coroutine on the same worker thread.
-
-### 3. Added yielding to leaf CAS retry paths
-
-The leaf insertion path already has retry loops when a compare-and-swap loses a
-race. In the CXL mode, these retries also become pure local spinning. To avoid
-burning CPU on a hot leaf page, the following retry points now yield after
-repeated failures:
-
-- `retry_insert`
-- `retry_insert_2`
-
-Again, this does not change the insertion algorithm. It only changes how long a
-single coroutine monopolizes the worker thread while retrying.
-
-### 4. Replaced the RDMA CQ-driven coroutine scheduler with round-robin for CXL
+### 1. Replaced the RDMA CQ-driven coroutine scheduler with round-robin for CXL
 
 The original `coro_master()` is driven by `PollRdmaCqOnce()`. That makes sense
 for RDMA because workers resume when outstanding requests complete.
@@ -93,7 +53,7 @@ when `DEFT_CXL` is enabled:
 This is a deliberately small change. It avoids pretending that CXL has a
 completion queue while still preserving the existing coroutine framework.
 
-### 5. Added a small worker time slice
+### 2. Added a small worker time slice
 
 In `coro_worker()`, the CXL path now yields back to the master after a small
 number of completed operations. The current slice length is:
@@ -104,6 +64,27 @@ This prevents one coroutine from running an arbitrarily long streak of
 uncontended operations while the others remain unscheduled. The slice is short
 enough to keep the round-robin scheduler active, but long enough to avoid
 switching on every single request.
+
+### 3. Kept lock/retry logic unchanged
+
+An earlier draft attempted to yield directly inside lock acquisition and CAS
+retry loops. That approach is unsafe in the current DEFT locking model because a
+coroutine may already hold a lock, hold a shared lock during an upgrade path, or
+already occupy a position in the SX lock ticket sequence when the yield occurs.
+
+Under cooperative scheduling, yielding in those states can artificially extend
+lock hold time or delay ticket progress, which is much more likely to cause
+flaky stalls than to improve throughput.
+
+For that reason, the minimal implementation intentionally does **not** yield
+inside:
+
+- `acquire_sx_lock()`
+- `lock_and_read()`
+- leaf CAS retry loops
+
+This keeps the synchronization semantics identical to the original code and
+limits coroutine-specific changes to the scheduler itself.
 
 ## Why This Is a Minimal Change
 
@@ -124,9 +105,9 @@ where synchronous shared-memory execution makes the RDMA logic unsuitable.
 With this change, coroutines under CXL are no longer expected to hide memory
 latency. Instead, they are expected to:
 
-- reduce wasted CPU spinning during lock contention
-- let another request make progress while one coroutine is stuck retrying
-- provide a basic fairness improvement under hot-page contention
+- provide basic fairness across coroutines on the same worker thread
+- avoid the RDMA-only assumption that progress comes from CQ completions
+- offer a minimal cooperative scheduling baseline for CXL experiments
 
 This means the CXL coroutine mode should be interpreted differently from the
 RDMA coroutine mode:
@@ -152,11 +133,11 @@ introduce a CXL-appropriate baseline with minimal structural change.
 The following items were intentionally left out of the minimal implementation
 and should be treated as future work:
 
-- Adaptive yield thresholds based on retry count, lock hotness, or observed
-  contention.
 - A runnable queue / blocked queue design instead of simple round-robin.
 - Lock-address-aware scheduling so coroutines blocked on the same hot page do
   not immediately contend again.
+- Safe yield points that are explicitly aware of lock ownership, SX ticket
+  state, and upgrade state.
 - Backoff strategies that combine yielding with contention-aware delay control.
 - Yielding in additional retry-heavy paths such as cache-miss retries or root
   retry loops, after separate evaluation.
