@@ -147,12 +147,7 @@ class DSMClient {
             CoroContext *ctx = nullptr) {
     (void)signal; (void)ctx;
     void *remote_ptr = resolve(gaddr);
-    if (size == sizeof(uint64_t)) {
-      uint64_t v = __atomic_load_n((uint64_t *)remote_ptr, __ATOMIC_RELAXED);
-      *(uint64_t *)buffer = v;
-    } else {
-      memcpy(buffer, remote_ptr, size);
-    }
+    memcpy(buffer, remote_ptr, size);
   }
 
   void ReadSync(char *buffer, GlobalAddress gaddr, size_t size,
@@ -172,12 +167,7 @@ class DSMClient {
              bool signal = true, CoroContext *ctx = nullptr) {
     (void)signal; (void)ctx;
     void *remote_ptr = resolve(gaddr);
-    if (size == sizeof(uint64_t)) {
-      __atomic_store_n((uint64_t *)remote_ptr, *(const uint64_t *)buffer,
-                       __ATOMIC_RELAXED);
-    } else {
-      memcpy(remote_ptr, buffer, size);
-    }
+    memcpy(remote_ptr, buffer, size);
   }
 
   void WriteSync(const char *buffer, GlobalAddress gaddr, size_t size,
@@ -499,12 +489,7 @@ class DSMClient {
               bool signal = true, CoroContext *ctx = nullptr) {
     (void)signal; (void)ctx;
     void *lock_ptr = resolve_lock(gaddr);
-    if (size == sizeof(uint64_t)) {
-      uint64_t v = __atomic_load_n((uint64_t *)lock_ptr, __ATOMIC_RELAXED);
-      *(uint64_t *)buffer = v;
-    } else {
-      memcpy(buffer, lock_ptr, size);
-    }
+    memcpy(buffer, lock_ptr, size);
   }
 
   void ReadDmSync(char *buffer, GlobalAddress gaddr, size_t size,
@@ -517,12 +502,7 @@ class DSMClient {
                bool signal = true, CoroContext *ctx = nullptr) {
     (void)signal; (void)ctx;
     void *lock_ptr = resolve_lock(gaddr);
-    if (size == sizeof(uint64_t)) {
-      __atomic_store_n((uint64_t *)lock_ptr, *(const uint64_t *)buffer,
-                       __ATOMIC_RELAXED);
-    } else {
-      memcpy(lock_ptr, buffer, size);
-    }
+    memcpy(lock_ptr, buffer, size);
   }
 
   void WriteDmSync(const char *buffer, GlobalAddress gaddr, size_t size,
