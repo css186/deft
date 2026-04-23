@@ -554,7 +554,7 @@ class DSMClient {
     uint64_t *ptr = (uint64_t *)resolve_lock(gaddr);
     uint64_t new_val = 0;
     faa_bound_impl(ptr, add_val, mask, rdma_buffer, &new_val);
-    trace_lock_transition("FaaDmBound", gaddr, add_val, *rdma_buffer, new_val);
+    // trace_lock_transition("FaaDmBound", gaddr, add_val, *rdma_buffer, new_val);
   }
 
   void FaaDmBoundSync(GlobalAddress gaddr, int log_sz, uint64_t add_val,
